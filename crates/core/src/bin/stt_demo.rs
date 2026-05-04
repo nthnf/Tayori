@@ -1,15 +1,19 @@
 use std::{
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::Result;
 use audio::{
-    CaptureDevice, CpalCapture, CpalCaptureConfig, SileroVadConfig, SileroVadSegmenter,
-    SpeechSegment,
+    AudioSnapshotRequest, CaptureDevice, CpalCapture, CpalCaptureConfig, FinalReason,
+    LiveSnapshotScheduler, LiveSnapshotSchedulerConfig, RollingAudioBuffer, SileroVadConfig,
+    SileroVadWatcher, SnapshotKind,
 };
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
-use stt::{SttConfig, Transcription, WhisperEngine, whisper_model_path};
+use crossbeam_channel::{Receiver, Sender, bounded};
+use stt::{
+    SttConfig, SttJob, SttJobInbox, SttJobKind, Transcription, WhisperEngine, whisper_model_path,
+};
 
 fn main() -> Result<()> {
     let capture = CpalCapture::new(CpalCaptureConfig {
@@ -22,26 +26,49 @@ fn main() -> Result<()> {
 
     let handle = capture.start()?;
 
-    let mut vad = SileroVadSegmenter::new(SileroVadConfig {
-        threshold: 0.2,
-        min_segment_ms: 300,
-        max_segment_ms: 3_000,
-        pre_roll_frames: 2,
+    let mut rolling_buffer = RollingAudioBuffer::with_seconds(60, 16_000);
+
+    let mut vad = SileroVadWatcher::new(SileroVadConfig {
+        threshold: 0.55,
+        frame_samples: 512,
         ..Default::default()
     })?;
 
-    let (segment_tx, segment_rx) = bounded::<SpeechSegment>(2);
-    let (transcript_tx, transcript_rx) = bounded::<Transcription>(16);
+    let mut snapshot_scheduler = LiveSnapshotScheduler::new(LiveSnapshotSchedulerConfig {
+        min_transcribe_samples: 16_000 / 2,
+        partial_interval_samples: 16_000 * 2,
+        max_utterance_samples: 16_000 * 12,
+    });
 
-    let stt_thread = spawn_stt_worker(segment_rx, transcript_tx);
+    let inbox = Arc::new(Mutex::new(SttJobInbox::default()));
+    let (wake_tx, wake_rx) = bounded::<()>(1);
+    let (transcript_tx, transcript_rx) = bounded::<Transcription>(32);
+
+    let worker = spawn_stt_worker(inbox.clone(), wake_rx, transcript_tx);
 
     let started_at = Instant::now();
     let duration = Duration::from_secs(120);
 
     while started_at.elapsed() < duration {
         if let Ok(frame) = handle.frames.recv_timeout(Duration::from_millis(100)) {
-            if let Some(segment) = vad.push_frame(frame)? {
-                send_latest_segment(&segment_tx, segment);
+            rolling_buffer.push_frame(&frame);
+
+            let vad_update = vad.push_frame(frame)?;
+
+            let requests = snapshot_scheduler.push_vad_update(vad_update);
+
+            for request in requests {
+                if let Ok(samples) = rolling_buffer.slice(request.start_sample, request.end_sample)
+                {
+                    let job = snapshot_request_to_job(request, samples);
+
+                    {
+                        let mut inbox = inbox.lock().expect("STT inbox mutex poisoned");
+                        inbox.push(job);
+                    }
+
+                    let _ = wake_tx.try_send(());
+                }
             }
         }
 
@@ -52,31 +79,44 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Some(segment) = vad.flush() {
-        send_latest_segment(&segment_tx, segment);
-    }
-
-    drop(segment_tx);
-
-    while let Ok(transcription) = transcript_rx.recv_timeout(Duration::from_millis(500)) {
-        if !transcription.text.is_empty() {
-            println!("{}", transcription.text);
-        }
-    }
+    drop(wake_tx);
 
     handle.stop()?;
 
-    let _ = stt_thread.join();
+    let _ = worker.join();
 
     Ok(())
 }
 
+fn snapshot_request_to_job(request: AudioSnapshotRequest, samples: Vec<f32>) -> SttJob {
+    let kind = match request.kind {
+        SnapshotKind::LivePartial => SttJobKind::LivePartial {
+            utterance_id: request.utterance_id,
+        },
+
+        SnapshotKind::Final { reason } => {
+            let _reason = match reason {
+                FinalReason::Silence => "silence",
+                FinalReason::MaxUtterance => "max_utterance",
+            };
+
+            SttJobKind::Final {
+                utterance_id: request.utterance_id,
+            }
+        }
+    };
+
+    SttJob::new(kind, request.start_sample, request.end_sample, samples)
+}
+
 fn spawn_stt_worker(
-    segment_rx: Receiver<SpeechSegment>,
+    inbox: Arc<Mutex<SttJobInbox>>,
+    wake_rx: Receiver<()>,
     transcript_tx: Sender<Transcription>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let stt = match WhisperEngine::new(SttConfig {
+            model_path: whisper_model_path("ggml-medium.en-q5_0.bin"),
             single_segment: true,
             ..Default::default()
         }) {
@@ -87,29 +127,41 @@ fn spawn_stt_worker(
             }
         };
 
-        while let Ok(segment) = segment_rx.recv() {
-            match stt.transcribe_samples(&segment.samples) {
-                Ok(transcription) => {
-                    let _ = transcript_tx.try_send(transcription);
-                }
-                Err(err) => {
-                    eprintln!("STT failed: {err:?}");
+        while wake_rx.recv().is_ok() {
+            loop {
+                let job = {
+                    let mut inbox = inbox.lock().expect("STT inbox mutex poisoned");
+                    inbox.pop_next()
+                };
+
+                let Some(job) = job else {
+                    break;
+                };
+
+                let started = Instant::now();
+
+                match stt.transcribe_samples(&job.samples) {
+                    Ok(transcription) => {
+                        let audio_secs = job.duration_seconds();
+                        let stt_secs = started.elapsed().as_secs_f32();
+                        let rtf = if audio_secs > 0.0 {
+                            stt_secs / audio_secs
+                        } else {
+                            0.0
+                        };
+
+                        eprintln!(
+                            "stt_job={:?} audio={:.2}s stt={:.2}s rtf={:.2}",
+                            job.kind, audio_secs, stt_secs, rtf
+                        );
+
+                        let _ = transcript_tx.try_send(transcription);
+                    }
+                    Err(err) => {
+                        eprintln!("STT failed: {err:?}");
+                    }
                 }
             }
         }
     })
-}
-
-fn send_latest_segment(tx: &Sender<SpeechSegment>, segment: SpeechSegment) {
-    match tx.try_send(segment) {
-        Ok(()) => {}
-
-        Err(TrySendError::Full(segment)) => {
-            // Live mode rule:
-            // If STT is behind, drop one stale segment and keep the newest one.
-            let _ = tx.try_send(segment);
-        }
-
-        Err(TrySendError::Disconnected(_)) => {}
-    }
 }
