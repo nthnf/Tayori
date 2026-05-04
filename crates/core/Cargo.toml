@@ -1,0 +1,13 @@
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+hound = "3.5.1"
+crossbeam-channel = "0.5.15"
+audio = { path = "../audio" }
+stt = { path = "../stt" }

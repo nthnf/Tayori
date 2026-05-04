@@ -1,0 +1,30 @@
+[package]
+name = "tayori"
+version = "0.1.0"
+authors = ["Nathan Farrel <nathanfarrel1128@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+resolver = "3"
+members = [
+  "migration",
+
+  "crates/audio",
+  "crates/core",
+  "crates/detection",
+  "crates/llm",
+  "crates/rag",
+  "crates/storage",
+  "crates/stt",
+]
+
+[dependencies]
+dioxus = { version = "0.7.7", features = [] }
+
+[features]
+default = ["desktop"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
