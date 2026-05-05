@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryReason {
     NearCurrentQuestion,
@@ -20,6 +22,11 @@ pub struct SttJob {
     pub start_sample: u64,
     pub end_sample: u64,
     pub samples: Vec<f32>,
+
+    /// When the scheduler created this job.
+    ///
+    /// Used to measure queue delay before the STT worker starts processing it.
+    created_at: Instant,
 }
 
 impl SttJob {
@@ -29,6 +36,7 @@ impl SttJob {
             start_sample,
             end_sample,
             samples,
+            created_at: Instant::now(),
         }
     }
 
@@ -38,5 +46,17 @@ impl SttJob {
 
     pub fn is_partial(&self) -> bool {
         matches!(self.kind, SttJobKind::LivePartial { .. })
+    }
+
+    pub fn queue_age(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    pub fn queue_age_seconds(&self) -> f32 {
+        self.queue_age().as_secs_f32()
+    }
+
+    pub fn sample_len(&self) -> usize {
+        self.samples.len()
     }
 }

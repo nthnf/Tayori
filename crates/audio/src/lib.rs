@@ -19,6 +19,5 @@ pub use streaming::{
 };
 
 pub use vad::{
-    SileroVadConfig, SileroVadSegmenter, SileroVadWatcher, SpeechSegment, SpeechTransition,
-    VadFrameUpdate, VadSignal, VadStateTracker,
+    SileroVadConfig, SileroVadWatcher, SpeechTransition, VadFrameUpdate, VadSignal, VadStateTracker,
 };

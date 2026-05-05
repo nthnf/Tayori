@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use tracing::{debug, trace};
+
 use crate::{SttJob, SttJobKind};
 
 #[derive(Debug, Default)]
@@ -18,10 +20,30 @@ pub struct SttJobInbox {
 
 impl SttJobInbox {
     pub fn push(&mut self, job: SttJob) {
+        let pending_before = self.pending_count();
+
         match job.kind {
             SttJobKind::LivePartial { utterance_id } => {
                 if utterance_id <= self.closed_utterance_up_to {
+                    debug!(
+                        ?job.kind,
+                        start_sample = job.start_sample,
+                        end_sample = job.end_sample,
+                        closed_utterance_up_to = self.closed_utterance_up_to,
+                        "dropping stale live partial"
+                    );
+
                     return;
+                }
+
+                if let Some(previous) = &self.latest_partial {
+                    debug!(
+                        previous_kind = ?previous.kind,
+                        previous_range = ?(previous.start_sample, previous.end_sample),
+                        new_kind = ?job.kind,
+                        new_range = ?(job.start_sample, job.end_sample),
+                        "replacing pending live partial"
+                    );
                 }
 
                 self.latest_partial = Some(job);
@@ -32,6 +54,13 @@ impl SttJobInbox {
 
                 if let Some(partial) = &self.latest_partial {
                     if partial_utterance_id(partial) <= Some(utterance_id) {
+                        debug!(
+                            final_utterance_id = utterance_id,
+                            partial_kind = ?partial.kind,
+                            partial_range = ?(partial.start_sample, partial.end_sample),
+                            "dropping pending partial because final arrived"
+                        );
+
                         self.latest_partial = None;
                     }
                 }
@@ -47,14 +76,40 @@ impl SttJobInbox {
                 self.archives.push_back(job);
             }
         }
+
+        trace!(
+            pending_before,
+            pending_after = self.pending_count(),
+            finals = self.finals.len(),
+            recoveries = self.recoveries.len(),
+            archives = self.archives.len(),
+            has_partial = self.latest_partial.is_some(),
+            "STT inbox push completed"
+        );
     }
 
     pub fn pop_next(&mut self) -> Option<SttJob> {
-        self.finals
+        let job = self
+            .finals
             .pop_front()
             .or_else(|| self.recoveries.pop_front())
             .or_else(|| self.latest_partial.take())
-            .or_else(|| self.archives.pop_front())
+            .or_else(|| self.archives.pop_front());
+
+        if let Some(job) = &job {
+            debug!(
+                ?job.kind,
+                start_sample = job.start_sample,
+                end_sample = job.end_sample,
+                samples = job.sample_len(),
+                audio_secs = job.duration_seconds(),
+                queue_age_secs = job.queue_age_seconds(),
+                pending_after_pop = self.pending_count(),
+                "popped STT job"
+            );
+        }
+
+        job
     }
 
     pub fn is_empty(&self) -> bool {
@@ -178,7 +233,6 @@ mod tests {
             SttJobKind::Recovery { .. }
         ));
 
-        // Partial for utterance 1 should have been dropped when final arrived.
         assert!(inbox.pop_next().is_none());
     }
 }
