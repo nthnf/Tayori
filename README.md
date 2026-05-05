@@ -1,106 +1,157 @@
 # Tayori
 
-Tayori is a local-first meeting/audio assistant experiment.
+Tayori is an early-stage local-first meeting/audio assistant for Linux.
 
-The current prototype captures Linux system audio, detects speech, transcribes speech with local Whisper models through `whisper-rs`, and prints transcript output from a demo binary. The product direction is **not** a live transcript app. The goal is to capture meeting context, detect useful/question-like moments, and help answer or summarize with an efficient local/cloud AI pipeline.
+The current prototype captures system audio, detects speech, and transcribes it locally with Whisper models through `whisper-rs` / `whisper.cpp`. It is currently a developer prototype, not a packaged desktop app yet.
 
-## Current status
+## What works today
 
-This repository is still early-stage. The current working pieces are:
+- Capture system/output audio on Linux through CPAL + PipeWire.
+- Convert captured audio into mono 16 kHz frames for VAD/STT.
+- Detect speech activity with Silero VAD.
+- Transcribe speech locally with Whisper `ggml` models.
+- Run a terminal STT demo.
+- Record processed STT audio to a WAV file for debugging.
 
-- Linux system audio capture through CPAL/PipeWire.
-- Audio normalization into mono 16 kHz frames for VAD/STT.
-- Rolling audio buffer for recent STT windows.
-- Silero VAD watcher for speech activity detection.
-- Local Whisper STT through `whisper-rs` / `whisper.cpp`.
-- STT job queue with latest-partial replacement and final job priority.
-- Debug/demo binaries for WAV capture and STT timing.
+## Current limitations
 
-The current README used to be the default Dioxus template; this file documents the actual Tayori direction.
+- Linux only.
+- The current capture path targets system/output audio, not the user's microphone.
+- The app is not packaged yet; run it through Cargo or the release binary.
+- Local transcription performance depends heavily on the selected Whisper model and GPU/CPU.
+- The current demo is for development/testing and may print repeated partial transcription output.
 
-## Workspace layout
+## Repository layout
 
 ```txt
 .
 ├── crates/
-│   ├── audio/      # capture, resampling, rolling buffer, VAD, STT snapshot scheduling
+│   ├── audio/      # audio capture, resampling, rolling buffer, VAD, snapshot scheduling
 │   ├── core/       # demo binaries and orchestration experiments
-│   ├── detection/  # planned question/usefulness detection
-│   ├── llm/        # planned LLM provider abstraction
-│   ├── rag/        # planned retrieval/embedding layer
-│   ├── storage/    # planned session/project persistence
-│   └── stt/        # Whisper model pathing, STT jobs, scheduler, engine
+│   ├── detection/  # question/usefulness detection experiments
+│   ├── llm/        # LLM provider integration experiments
+│   ├── rag/        # retrieval/embedding experiments
+│   ├── storage/    # persistence experiments
+│   └── stt/        # Whisper model paths, STT jobs, queue, and engine
 ├── migration/      # database migrations
 └── README.md
 ```
 
-The root workspace currently includes `audio`, `core`, `detection`, `llm`, `rag`, `storage`, and `stt` crates.
+## System requirements
 
-## Current audio/STT flow
+### Required
 
-```txt
-System audio
-  ↓
-CPAL PipeWire capture
-  ↓
-16 kHz mono AudioFrame stream
-  ↓
-RollingAudioBuffer
-  ↓
-SileroVadWatcher
-  ↓
-LiveSnapshotScheduler
-  ↓
-SttJobInbox
-  ↓
-WhisperEngine
-  ↓
-Transcript output
+- Linux with PipeWire.
+- Rust stable toolchain.
+- Cargo.
+- C/C++ build tools.
+- CMake.
+- Clang/libclang for bindgen-based native builds.
+- PipeWire development libraries.
+- PulseAudio/PipeWire Pulse compatibility libraries.
+
+### Recommended
+
+- Dedicated GPU for local Whisper inference.
+- Vulkan runtime and headers if building `whisper-rs` with Vulkan support.
+- 16 GB RAM or more for comfortable local development.
+- A small English Whisper model for live/local testing.
+
+## Arch / Omarchy setup
+
+On Arch-based systems, start with:
+
+```bash
+sudo pacman -S --needed \
+  base-devel \
+  rust \
+  cmake \
+  clang \
+  pipewire \
+  pipewire-pulse \
+  pipewire-alsa \
+  alsa-lib \
+  vulkan-headers \
+  vulkan-icd-loader
 ```
 
-Important implementation details:
+For AMD GPUs, make sure your Mesa/Vulkan driver is installed. For example:
 
-- Audio capture currently targets system/output audio, not the user's microphone.
-- STT expects Whisper `ggml` model files under Tayori's app data directory.
-- The STT crate default model path is:
-
-```txt
-$XDG_DATA_HOME/tayori/models/whisper/ggml-large-v3-turbo-q5_0.bin
+```bash
+sudo pacman -S --needed mesa vulkan-radeon
 ```
 
-If `XDG_DATA_HOME` is unset, it falls back to:
+Useful GPU monitoring tools:
 
-```txt
-~/.local/share/tayori/models/whisper/ggml-large-v3-turbo-q5_0.bin
+```bash
+sudo pacman -S --needed nvtop
 ```
 
-Demo binaries may override the model name directly in code.
+Optional AMD-specific monitor:
 
-## Running the STT demo
+```bash
+paru -S amdgpu_top
+```
 
-Build first:
+## Whisper models
+
+Tayori expects Whisper `ggml` model files under the app data directory.
+
+Default path shape:
+
+```txt
+$XDG_DATA_HOME/tayori/models/whisper/<model-file>
+```
+
+If `XDG_DATA_HOME` is not set:
+
+```txt
+~/.local/share/tayori/models/whisper/<model-file>
+```
+
+Example:
+
+```txt
+~/.local/share/tayori/models/whisper/ggml-small.en.bin
+```
+
+The STT crate default currently points at:
+
+```txt
+ggml-large-v3-turbo-q5_0.bin
+```
+
+Some demos may override this in code. For practical local testing, `small.en` or another small English model is recommended.
+
+## Build
 
 ```bash
 cargo build --release -p core
 ```
 
-Run with logs:
+## Run STT demo
+
+With logs:
 
 ```bash
 target/release/stt_demo
 ```
 
-Run transcript-only mode:
+Transcript-only mode:
 
 ```bash
 QUIET=1 target/release/stt_demo
 ```
 
-Stop the demo with `Ctrl+C`.
+Stop with:
 
-## Recording processed audio for debugging
+```txt
+Ctrl+C
+```
 
-The WAV demo records the same processed audio format used by VAD/STT: mono, 16 kHz, 16-bit WAV.
+## Record processed STT audio
+
+This records the same processed audio stream used by VAD/STT: mono, 16 kHz, 16-bit WAV.
 
 ```bash
 cargo run --release -p core --bin capture_wav_demo
@@ -112,231 +163,28 @@ Custom duration:
 cargo run --release -p core --bin capture_wav_demo -- --seconds 30
 ```
 
-Custom output:
+Custom output path:
 
 ```bash
 cargo run --release -p core --bin capture_wav_demo -- --out /tmp/tayori-test.wav
 ```
 
-This is useful for checking what Whisper actually receives. It is not meant to be full-quality meeting playback audio.
+Play the output:
 
-## Current performance findings
-
-The prototype showed that Tayori's Rust/audio architecture is cheap compared to Whisper inference:
-
-- Rolling buffer push/slice, queue operations, and segment collection are tiny.
-- Whisper `state.full()` dominates STT job time.
-- `small.en`-class models are practical for live-ish local use on a midrange GPU.
-- Medium/large models are better suited for background repair/context, not always-on low-latency transcription.
-
-This means the main optimization strategy should be **fewer, more valuable STT jobs**, not micro-optimizing the buffer or channels first.
-
-## Target product architecture
-
-Tayori should move from a live-transcript demo to a session timeline system.
-
-```txt
-System audio capture
-  ├── Raw audio recorder lane
-  │     └── save full meeting audio to disk
-  │
-  └── STT processing lane
-        ↓
-      VAD speech chunks
-        ↓
-      local Whisper small/en model
-        ↓
-      transcript chunks
-        ↓
-      question/usefulness detector
-        ↓
-      answer/context pipeline
+```bash
+pw-play /tmp/tayori-test.wav
 ```
 
-The meeting record should not be only a transcript. It should be a timeline of events:
+This is meant for debugging what Whisper receives. It is not full-quality meeting playback audio.
 
-```txt
-SessionTimeline
-  ├── audio_chunk
-  ├── transcript_chunk
-  ├── question_candidate
-  ├── assistant_answer
-  ├── user_note
-  ├── user_override_answer
-  ├── answer_feedback
-  └── summary_event
-```
+## Development notes
 
-This matters because Tayori currently captures system audio, not the user's mic. If Tayori suggests an answer, or the user answers differently, that has to be stored as a timeline event or the meeting record will be incomplete.
+The audio crate currently depends on CPAL from a pinned Git revision with `pipewire` and `pulseaudio` features enabled.
 
-## Planned architecture update
+The STT crate currently uses `whisper-rs` with Vulkan support enabled.
 
-### 1. Stop treating live partials as the product
+The current performance bottleneck is local Whisper inference, not the Rust audio pipeline. Smaller English models are much more practical for low-latency local testing than medium/large models.
 
-Live partials are useful for debugging, but they create repeated transcript spam and extra Whisper jobs.
+## License
 
-Default app behavior should become:
-
-```txt
-VAD speech start
-  ↓
-collect speech chunk
-  ↓
-finalize after short silence or max chunk duration
-  ↓
-transcribe final chunk
-```
-
-Suggested defaults:
-
-```txt
-min chunk:          1.0s–1.5s
-silence finalize:   600ms–800ms
-normal chunk:        4s–8s
-forced max chunk:    8s–12s
-overlap:             500ms–1s
-rolling buffer:      60s
-```
-
-Do not use 60-second Whisper jobs as the normal STT path. Keep the 60-second rolling buffer for recovery/context, not routine transcription.
-
-### 2. Add raw audio recorder lane
-
-Store full session audio directly to disk while keeping the STT rolling buffer small.
-
-Recommended split:
-
-```txt
-Human replay recording:
-  48 kHz stereo Opus/WebM or WAV
-
-STT processing stream:
-  16 kHz mono f32
-```
-
-The app should never keep the whole meeting audio in memory.
-
-### 3. Store transcript chunks with timestamps
-
-Minimal shape:
-
-```rust
-struct TranscriptChunk {
-    session_id: String,
-    start_ms: i64,
-    end_ms: i64,
-    text: String,
-    is_question_candidate: bool,
-}
-```
-
-This enables time-based context retrieval without embedding every chunk immediately.
-
-### 4. Add cheap question/usefulness detection
-
-Whisper cannot cheaply skim audio for questions. The practical MVP flow is:
-
-```txt
-audio → VAD → STT text → question detector
-```
-
-Start with a cheap text detector:
-
-- question mark
-- question words: what, why, how, when, where, can, could, should, would
-- intent phrases: explain, compare, design, how do I, what if
-
-Later this can become a small classifier or LLM-based detector.
-
-### 5. Add meeting memory without embedding everything live
-
-Do not tokenize/embed the whole meeting in real time.
-
-Use layered memory:
-
-```txt
-Recent verbatim memory:
-  last 60–120s transcript chunks
-
-Rolling summary memory:
-  compact topic summary updated less frequently
-
-Persistent transcript store:
-  all chunks with timestamps
-
-Embeddings:
-  question chunks immediately
-  normal chunks lazily/background/after meeting
-```
-
-For a detected question, build context from:
-
-```txt
-current question chunk
-+ previous 60–120s transcript
-+ current rolling summary
-+ optional retrieved chunks
-```
-
-### 6. Store assistant and user answer events
-
-Because microphone capture is not currently part of the app, Tayori must store non-audio events:
-
-```txt
-assistant_answer
-user_override_answer
-user_note
-answer_feedback
-```
-
-If the user rejects the LLM answer and uses their own response, store the user's response as the source of truth for later summaries.
-
-### 7. Make compute modes explicit
-
-Tayori should have modes instead of pretending every device can run everything locally.
-
-Low-power mode:
-
-```txt
-STT: small/en model
-partials: off
-embeddings: question-only live
-LLM: cloud/provider API
-summary: after meeting only
-```
-
-Recommended mode:
-
-```txt
-STT: small/en model
-partials: off by default
-embeddings: question-only live, background for transcript
-LLM: provider API or optional local
-raw audio: enabled
-```
-
-High-accuracy mode:
-
-```txt
-STT: medium/large repair lane
-embeddings: live + background
-LLM: local optional
-summaries: periodic/post-meeting
-```
-
-## Strong default direction
-
-For the MVP, Tayori should default to:
-
-```txt
-raw audio recording:     on
-live partial transcript: off
-STT model:               small/en class
-STT chunks:              final/forced chunks only
-question detection:      cheap text detector
-embeddings:              question-only live
-LLM answer generation:   provider/API first
-summarization:           optional after meeting
-```
-
-This keeps the app realistic on midrange machines and avoids turning every second of meeting audio into expensive AI work.
+Not specified yet.
