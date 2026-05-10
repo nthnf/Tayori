@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 tracing = "0.1.44"
+crossbeam-channel = "0.5.15"
 whisper-rs = { version = "0.16.0", features = ["vulkan"] }

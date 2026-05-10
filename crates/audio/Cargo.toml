@@ -10,7 +10,12 @@ crossbeam-channel = "0.5.15"
 rubato = "2.0.0"
 tracing = "0.1.44"
 silero-vad-rust = "6.2.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "078787ee8061c41fc3198e3a39d55238bc68fa4d", features = [
   "pipewire",
   "pulseaudio",
 ] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "078787ee8061c41fc3198e3a39d55238bc68fa4d" }

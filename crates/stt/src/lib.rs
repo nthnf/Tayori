@@ -1,13 +1,15 @@
-mod config;
-mod job;
-mod model_path;
-mod scheduler;
-mod transcript;
-mod whisper_engine;
+//! Speech-to-text utilities built around Whisper.
+//!
+//! This crate owns the model path logic, the transcription wrapper, and the
+//! background worker that turns raw PCM jobs into transcription chunks.
 
-pub use config::{SttConfig, SttLanguage, SttSampling};
-pub use job::{RecoveryReason, SttJob, SttJobKind};
-pub use model_path::{default_whisper_model_path, whisper_model_path};
-pub use scheduler::SttJobInbox;
-pub use transcript::{TranscriptSegment, Transcription};
-pub use whisper_engine::WhisperEngine;
+/// Final transcribed chunk emitted by STT.
+pub mod chunk;
+/// Raw jobs fed into the transcription worker.
+pub mod job;
+/// Model path helpers.
+pub mod path;
+/// Whisper model wrapper.
+pub mod transcribe;
+/// Background transcription worker.
+pub mod worker;
