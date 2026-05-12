@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use ringbuf::{traits::Consumer, traits::Producer, HeapCons, HeapProd};
+use ringbuf::{HeapCons, HeapProd, traits::Consumer, traits::Producer};
 use rubato::{
-    audioadapter_buffers::direct::SequentialSliceOfVecs, calculate_cutoff, Async, FixedAsync,
-    Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction, audioadapter_buffers::direct::SequentialSliceOfVecs, calculate_cutoff,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};

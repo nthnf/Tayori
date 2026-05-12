@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
-use ringbuf::{traits::Consumer, HeapCons};
+use ringbuf::{HeapCons, traits::Consumer};
 use silero_vad_rust::{
     load_silero_vad,
     silero_vad::utils_vad::{VadEvent, VadIterator, VadIteratorParams},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -122,6 +122,7 @@ impl VadWorker {
             let mut pending_samples = Vec::<f32>::new();
             let mut in_speech = false;
             let mut speech_started_at_sample = 0_u64;
+            let mut chunk_started_at_sample = 0_u64;
             let mut processed_samples = 0_u64;
             let mut stats = VadStats::new(config.sample_rate, config.frame_samples);
             let max_chunk_samples =
@@ -186,6 +187,7 @@ impl VadWorker {
                             in_speech = true;
                             speech_started_at_sample =
                                 processed_samples.saturating_sub(frame.len() as u64);
+                            chunk_started_at_sample = speech_started_at_sample;
                             speech_samples.clear();
                             speech_samples.extend_from_slice(frame);
                             info!(
@@ -196,9 +198,11 @@ impl VadWorker {
                             );
                             Self::flush_max_chunk(
                                 &mut speech_samples,
+                                &mut chunk_started_at_sample,
                                 max_chunk_samples,
                                 &output,
                                 &mut segment_index,
+                                config.sample_rate,
                             );
                         }
                         Some(VadEvent::End(_ts)) => {
@@ -208,14 +212,18 @@ impl VadWorker {
                                 speech_samples.extend_from_slice(frame);
                                 Self::flush_max_chunk(
                                     &mut speech_samples,
+                                    &mut chunk_started_at_sample,
                                     max_chunk_samples,
                                     &output,
                                     &mut segment_index,
+                                    config.sample_rate,
                                 );
                                 Self::flush_chunk(
                                     std::mem::take(&mut speech_samples),
+                                    chunk_started_at_sample,
                                     &output,
                                     &mut segment_index,
+                                    config.sample_rate,
                                 );
                                 let end_sample = processed_samples;
                                 info!(
@@ -238,9 +246,11 @@ impl VadWorker {
                                 speech_samples.extend_from_slice(frame);
                                 Self::flush_max_chunk(
                                     &mut speech_samples,
+                                    &mut chunk_started_at_sample,
                                     max_chunk_samples,
                                     &output,
                                     &mut segment_index,
+                                    config.sample_rate,
                                 );
                             }
                         }
@@ -258,7 +268,13 @@ impl VadWorker {
             if in_speech {
                 // Shutdown during speech should still emit what we heard so far.
                 speech_samples.extend_from_slice(&pending_samples);
-                Self::flush_chunk(speech_samples, &output, &mut segment_index);
+                Self::flush_chunk(
+                    speech_samples,
+                    chunk_started_at_sample,
+                    &output,
+                    &mut segment_index,
+                    config.sample_rate,
+                );
                 info!(
                     segment_index = segment_index.saturating_sub(1),
                     "VAD stopped during speech; final segment emitted"
@@ -277,19 +293,38 @@ impl VadWorker {
     }
 
     /// Build finalized speech segment.
-    fn create_chunk(samples: Vec<f32>, index: u64) -> SpeechSegment {
-        SpeechSegment::new(samples, index)
+    fn create_chunk(
+        samples: Vec<f32>,
+        index: u64,
+        start_sample: u64,
+        sample_rate: u32,
+    ) -> SpeechSegment {
+        let end_sample = start_sample + samples.len() as u64;
+        SpeechSegment::new(
+            samples,
+            index,
+            samples_to_ms_u64(start_sample, sample_rate),
+            samples_to_ms_u64(end_sample, sample_rate),
+        )
     }
 
     /// Force out a final chunk and increment the segment index.
-    fn flush_chunk(samples: Vec<f32>, output: &Sender<SpeechSegment>, segment_index: &mut u64) {
+    fn flush_chunk(
+        samples: Vec<f32>,
+        start_sample: u64,
+        output: &Sender<SpeechSegment>,
+        segment_index: &mut u64,
+        sample_rate: u32,
+    ) {
         if samples.is_empty() {
             return;
         }
 
-        let segment = Self::create_chunk(samples, *segment_index);
+        let segment = Self::create_chunk(samples, *segment_index, start_sample, sample_rate);
         debug!(
             segment_index = *segment_index,
+            start_ms = segment.start_ms,
+            end_ms = segment.end_ms,
             samples = segment.samples.len(),
             "VAD segment queued"
         );
@@ -300,11 +335,14 @@ impl VadWorker {
     /// Split the live buffer into fixed-size chunks when it grows too large.
     fn flush_max_chunk(
         speech_samples: &mut Vec<f32>,
+        chunk_started_at_sample: &mut u64,
         max_chunk_samples: usize,
         output: &Sender<SpeechSegment>,
         segment_index: &mut u64,
+        sample_rate: u32,
     ) {
         while speech_samples.len() >= max_chunk_samples {
+            let emitted_samples = max_chunk_samples as u64;
             let mut chunk = Vec::new();
             std::mem::swap(&mut chunk, speech_samples);
             // Keep overflow after max chunk so no speech samples are lost.
@@ -314,7 +352,14 @@ impl VadWorker {
                 Vec::new()
             };
 
-            Self::flush_chunk(chunk, output, segment_index);
+            Self::flush_chunk(
+                chunk,
+                *chunk_started_at_sample,
+                output,
+                segment_index,
+                sample_rate,
+            );
+            *chunk_started_at_sample += emitted_samples;
             *speech_samples = overflow;
         }
     }
@@ -326,6 +371,14 @@ fn samples_to_ms(samples: u64, sample_rate: u32) -> f64 {
     }
 
     samples as f64 / sample_rate as f64 * 1_000.0
+}
+
+fn samples_to_ms_u64(samples: u64, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+
+    samples.saturating_mul(1_000) / sample_rate as u64
 }
 
 struct VadStats {
@@ -393,12 +446,15 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut index = 0_u64;
 
-        VadWorker::flush_max_chunk(&mut samples, 6, &tx, &mut index);
+        let mut chunk_start = 0_u64;
+        VadWorker::flush_max_chunk(&mut samples, &mut chunk_start, 6, &tx, &mut index, 16_000);
 
         assert_eq!(index, 1);
+        assert_eq!(chunk_start, 6);
         assert_eq!(samples.len(), 4);
         let chunk = rx.try_recv().unwrap();
         assert_eq!(chunk.samples.len(), 6);
         assert_eq!(chunk.index, 0);
+        assert_eq!(chunk.start_ms, 0);
     }
 }

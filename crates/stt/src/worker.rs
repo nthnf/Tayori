@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -136,7 +136,12 @@ fn handle_job(
             );
             // If the UI/demo receiver is gone, drop the transcript. The pipeline
             // is shutting down or nobody is listening anymore.
-            let _ = output.send(TranscriptionChunk::new(body, job.index));
+            let _ = output.send(TranscriptionChunk::new(
+                body,
+                job.index,
+                job.start_ms,
+                job.end_ms,
+            ));
             debug!(
                 index = job.index,
                 total_ms = started_at.elapsed().as_secs_f64() * 1_000.0,

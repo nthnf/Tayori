@@ -1,13 +1,13 @@
 use crate::device::AudioDevice;
 use anyhow::Result;
 use cpal::{
-    traits::{DeviceTrait, StreamTrait},
     Device, FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig,
+    traits::{DeviceTrait, StreamTrait},
 };
-use ringbuf::traits::Producer;
 use ringbuf::HeapProd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use ringbuf::traits::Producer;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -217,7 +217,7 @@ impl CaptureStats {
 mod tests {
     use super::*;
     use ringbuf::traits::Consumer;
-    use ringbuf::{traits::Split, HeapRb};
+    use ringbuf::{HeapRb, traits::Split};
 
     #[test]
     fn push_input_samples_writes_converted_audio() {

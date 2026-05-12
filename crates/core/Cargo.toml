@@ -12,4 +12,9 @@ crossbeam-channel = "0.5.15"
 ctrlc = "3.5.2"
 audio = { path = "../audio" }
 stt = { path = "../stt" }
+storage = { path = "../storage" }
 ringbuf = "0.5.0"
+chrono = "0.4.44"
+sea-orm = "2.0.0-rc.38"
+sha2 = "0.10.9"
+uuid = { version = "1.23.1", features = ["v4"] }

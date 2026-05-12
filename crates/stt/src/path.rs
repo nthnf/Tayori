@@ -1,13 +1,9 @@
-use std::path::PathBuf;
+use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 /// Default whisper model name used by Tayori.
 #[allow(dead_code)]
 pub const DEFAULT_WHISPER_MODEL_NAME: &str = "small-q8_0";
-
-/// Build the default model path using the bundled default model name.
-pub fn default_model_path() -> PathBuf {
-    model_path(DEFAULT_WHISPER_MODEL_NAME)
-}
 
 /// Build the full on-disk path for a named whisper model.
 pub fn model_path(model_name: &str) -> PathBuf {
@@ -17,6 +13,22 @@ pub fn model_path(model_name: &str) -> PathBuf {
         .join("models")
         .join("whisper")
         .join(model_filename(model_name))
+}
+
+/// Ensure the parent directory for a model path exists.
+///
+/// `model_path` returns a file path, not a directory path, so this creates only
+/// the parent directory. `create_dir_all` works on Windows and Linux and is safe
+/// when the directory already exists.
+pub fn ensure_path_exists(path: impl AsRef<Path>) -> Result<()> {
+    let dir = path
+        .as_ref()
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("model path has no parent: {:?}", path.as_ref()))?;
+
+    std::fs::create_dir_all(dir)?;
+
+    Ok(())
 }
 
 fn model_filename(filename: &str) -> String {

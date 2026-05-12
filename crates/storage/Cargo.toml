@@ -4,8 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
+anyhow = "1.0.102"
+tracing = "0.1.44"
+lancedb = { version = "0.27.2" }
+arrow-array = "57.3.0"
+futures = "0.3.32"
 sea-orm = { version = "2.0.0-rc.38", features = [
   "sqlx-sqlite",
   "runtime-tokio",
   "macros",
+  "with-chrono",
+  "with-uuid",
+  "debug-print",
+  "mock",
 ] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
+tempfile = "3.27.0"
