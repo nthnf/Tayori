@@ -99,7 +99,7 @@ async fn create_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                     ColumnDef::new(Settings::LlmStoreResponses)
                         .integer()
                         .not_null()
-                        .default(0)
+                        .default(1)
                         .check((
                             "ck_settings_llm_store_responses",
                             Expr::col(Settings::LlmStoreResponses).is_in([0, 1]),
@@ -127,7 +127,12 @@ async fn create_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                         )),
                 )
                 .col(ColumnDef::new(Settings::RerankerModel).string().not_null())
-                .col(ColumnDef::new(Settings::WhisperModel).string().null())
+                .col(
+                    ColumnDef::new(Settings::WhisperModel)
+                        .string()
+                        .not_null()
+                        .default("small-q8_0"),
+                )
                 .col(
                     ColumnDef::new(Settings::SummaryMinutes)
                         .integer()
@@ -178,6 +183,7 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Settings::SparseModel,
             Settings::EmbeddingDimension,
             Settings::RerankerModel,
+            Settings::WhisperModel,
             Settings::SummaryMinutes,
             Settings::UiTheme,
         ])
@@ -185,12 +191,13 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             "default".into(),
             "openai".into(),
             "gpt-5.4-mini".into(),
-            0.into(),
+            1.into(),
             "fastembed".into(),
             "jinaai/jina-embeddings-v2-base-code".into(),
             "prithivida/splade_pp_en_v1".into(),
             768.into(),
             "jinaai/jina-reranker-v1-turbo-en".into(),
+            "small-q8_0".into(),
             5.into(),
             "dark".into(),
         ])

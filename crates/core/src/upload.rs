@@ -1,34 +1,14 @@
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use embedding::Embedder;
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use sha2::{Digest, Sha256};
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use storage::{entities::documents, lance_document::LanceDocumentChunk, storage::Storage};
 use uuid::Uuid;
 
 const DEFAULT_CHUNK_MAX_CHARS: usize = 2_400;
 const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 240;
-
-/// Async embedding provider used by document upload.
-///
-/// Core owns ingestion orchestration, but the actual embedding model/client is
-/// injected so this crate does not depend on one concrete embedding backend.
-pub trait DocumentEmbedder: Send + Sync {
-    fn embed<'a>(
-        &'a self,
-        text: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<DocumentEmbedding>> + Send + 'a>>;
-}
-
-/// Dense and sparse embeddings for one chunk.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DocumentEmbedding {
-    pub dense_vector: Vec<f32>,
-    pub sparse_indices: Vec<u32>,
-    pub sparse_values: Vec<f32>,
-}
 
 /// Result of ingesting one local document.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +41,7 @@ impl Default for UploadDocumentOptions {
 /// source file is later moved or deleted.
 pub async fn upload_document(
     storage: &Storage,
-    embedder: &dyn DocumentEmbedder,
+    embedder: &mut Embedder,
     project_id: String,
     path: impl AsRef<Path>,
 ) -> Result<UploadedDocument> {
@@ -75,10 +55,18 @@ pub async fn upload_document(
     .await
 }
 
+pub async fn list_documents(storage: &Storage, project_id: &str) -> Result<Vec<documents::Model>> {
+    Ok(documents::Entity::find()
+        .filter(documents::Column::ProjectId.eq(project_id))
+        .order_by_desc(documents::Column::UpdatedAt)
+        .all(&storage.sqlite)
+        .await?)
+}
+
 /// Ingest a local document with explicit chunking options.
 pub async fn upload_document_with_options(
     storage: &Storage,
-    embedder: &dyn DocumentEmbedder,
+    embedder: &mut Embedder,
     project_id: String,
     path: impl AsRef<Path>,
     options: UploadDocumentOptions,
@@ -155,7 +143,7 @@ pub async fn upload_document_with_options(
 
 async fn ingest_document_chunks(
     storage: &Storage,
-    embedder: &dyn DocumentEmbedder,
+    embedder: &mut Embedder,
     document_id: &str,
     project_id: &str,
     bytes: &[u8],
@@ -165,24 +153,41 @@ async fn ingest_document_chunks(
     let chunks = chunk_text(&text, options.chunk_max_chars, options.chunk_overlap_chars);
     ensure!(!chunks.is_empty(), "document contains no text to ingest");
 
-    for (index, chunk) in chunks.iter().enumerate() {
-        let embedding = embedder.embed(chunk).await?;
+    let dense_vectors = embedder.dense_embed(chunks.clone())?;
+    let sparse_vectors = embedder.sparse_embed_vectors(chunks.clone())?;
+    ensure!(
+        dense_vectors.len() == chunks.len() && sparse_vectors.len() == chunks.len(),
+        "embedding output count does not match chunk count"
+    );
+
+    let chunk_count = chunks.len();
+
+    for (index, ((chunk, dense_vector), sparse_vector)) in chunks
+        .into_iter()
+        .zip(dense_vectors)
+        .zip(sparse_vectors)
+        .enumerate()
+    {
+        ensure!(
+            sparse_vector.indices.len() == sparse_vector.values.len(),
+            "sparse embedding index/value length mismatch"
+        );
         storage
             .add_lance_document_chunk(LanceDocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 project_id: project_id.to_string(),
                 document_id: document_id.to_string(),
                 chunk_index: index as i64,
-                text: chunk.clone(),
-                dense_vector: embedding.dense_vector,
-                sparse_indices: embedding.sparse_indices,
-                sparse_values: embedding.sparse_values,
+                text: chunk,
+                dense_vector,
+                sparse_indices: sparse_vector.indices,
+                sparse_values: sparse_vector.values,
                 created_at_unix_secs: Utc::now().timestamp(),
             })
             .await?;
     }
 
-    Ok(chunks.len())
+    Ok(chunk_count)
 }
 
 async fn find_existing_ready_document(

@@ -5,9 +5,10 @@ use crate::types::{Page, ProjectCard, ProjectDraft};
 #[component]
 pub fn DashboardPage(
     mut draft: Signal<ProjectDraft>,
-    mut projects: Signal<Vec<ProjectCard>>,
+    projects: Signal<Vec<ProjectCard>>,
     mut page: Signal<Page>,
-    mut selected_project: Signal<Option<usize>>,
+    mut selected_project: Signal<Option<String>>,
+    on_create: EventHandler<ProjectDraft>,
 ) -> Element {
     let mut show_create = use_signal(|| false);
     let can_create = !draft.read().name.trim().is_empty();
@@ -21,9 +22,7 @@ pub fn DashboardPage(
             return;
         }
 
-        let id = projects.read().len() + 1;
-        projects.write().push(ProjectCard {
-            id,
+        on_create.call(ProjectDraft {
             name,
             description: current.description.trim().to_string(),
         });
@@ -52,7 +51,7 @@ pub fn DashboardPage(
                             button {
                                 class: "truncate rounded-md px-3 py-2 text-left text-sm text-body hover:bg-surface-strong hover:text-ink",
                                 onclick: move |_| {
-                                    selected_project.set(Some(project.id));
+                                    selected_project.set(Some(project.id.clone()));
                                     page.set(Page::Project);
                                 },
                                 "{project.name}"
@@ -75,7 +74,7 @@ pub fn DashboardPage(
                             button {
                                 class: "grid grid-cols-[1fr_180px_120px] gap-3 rounded-md px-3 py-3 text-left hover:bg-surface-soft",
                                 onclick: move |_| {
-                                    selected_project.set(Some(project.id));
+                                    selected_project.set(Some(project.id.clone()));
                                     page.set(Page::Project);
                                 },
                                 div {
