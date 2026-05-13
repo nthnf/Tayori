@@ -70,9 +70,11 @@ impl TranscriptionWorker {
 
     /// Stop worker thread.
     pub fn stop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        // Do not join here. Whisper decoding can be in progress and may take
+        // long enough to freeze the UI during session End/Pause. Dropping the
+        // handle detaches the worker; the shared stop flag makes it exit after
+        // the current decode finishes.
+        let _ = self.worker.take();
     }
 }
 

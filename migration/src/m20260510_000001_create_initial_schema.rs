@@ -147,7 +147,7 @@ async fn create_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                     ColumnDef::new(Settings::UiTheme)
                         .string()
                         .not_null()
-                        .default("dark")
+                        .default("light")
                         .check((
                             "ck_settings_ui_theme",
                             Expr::col(Settings::UiTheme).is_in(["dark", "light", "system"]),
@@ -190,7 +190,7 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         .values_panic([
             "default".into(),
             "openai".into(),
-            "gpt-5.4-mini".into(),
+            "gpt-4.1-mini".into(),
             1.into(),
             "fastembed".into(),
             "jinaai/jina-embeddings-v2-base-code".into(),
@@ -199,7 +199,7 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             "jinaai/jina-reranker-v1-turbo-en".into(),
             "small-q8_0".into(),
             5.into(),
-            "dark".into(),
+            "light".into(),
         ])
         .on_conflict(OnConflict::column(Settings::Id).do_nothing().to_owned())
         .to_owned();

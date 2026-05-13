@@ -1,14 +1,13 @@
 use dioxus::prelude::*;
-use tayori_core::AudioRuntime;
 use tayori_core::service::{
-    DocumentView, ProjectView, SessionView, SettingsUpdate, SettingsView, TayoriCore,
-    TranscriptChunkView,
+    DocumentView, LiveSessionEvent, LiveSessionHandle, ProjectView, SessionView, SettingsFormView,
+    TayoriCore, TranscriptChunkView, WhisperModelView, default_settings_form_view,
 };
 
 use crate::components::TopNav;
 use crate::pages::{DashboardPage, LiveRecordingPage, ProjectDetailPage, SettingsPage};
 use crate::types::{
-    DocumentCard, Page, ProjectCard, ProjectDraft, SessionCard, SettingsForm, Theme, TranscriptCard,
+    DocumentCard, Page, ProjectCard, ProjectDraft, SessionCard, Theme, TranscriptCard,
 };
 
 #[component]
@@ -18,7 +17,7 @@ pub fn App() -> Element {
     let core = use_resource(|| async { TayoriCore::bootstrap().await });
     let mut selected_project = use_signal(|| None::<String>);
     let mut selected_session = use_signal(|| None::<String>);
-    let mut audio_runtime = use_signal(|| None::<AudioRuntime>);
+    let mut live_session = use_signal(|| None::<LiveSessionHandle>);
     let mut is_listening = use_signal(|| false);
     let draft = use_signal(|| ProjectDraft {
         name: String::new(),
@@ -28,8 +27,12 @@ pub fn App() -> Element {
     let mut documents = use_signal(Vec::<DocumentCard>::new);
     let mut sessions = use_signal(Vec::<SessionCard>::new);
     let mut transcripts = use_signal(Vec::<TranscriptCard>::new);
-    let mut settings_form = use_signal(default_settings_form);
-    let mut saved_settings_form = use_signal(default_settings_form);
+    let mut detected_question = use_signal(|| None::<String>);
+    let mut suggested_answer = use_signal(|| None::<String>);
+    let mut show_missing_api_key = use_signal(|| false);
+    let mut settings_form = use_signal(default_settings_form_view);
+    let mut saved_settings_form = use_signal(default_settings_form_view);
+    let mut whisper_model = use_signal(|| None::<WhisperModelView>);
     let mut app_error = use_signal(|| None::<String>);
 
     use_effect(move || {
@@ -50,10 +53,9 @@ pub fn App() -> Element {
         if let Some(Ok(core)) = core.read().as_ref() {
             let core = core.clone();
             spawn(async move {
-                match core.settings().await {
-                    Ok(settings) => {
-                        let form = settings_form_from_view(settings);
-                        theme.set(form.ui_theme);
+                match core.settings_form().await {
+                    Ok(form) => {
+                        theme.set(theme_from_settings(&form.ui_theme));
                         settings_form.set(form.clone());
                         saved_settings_form.set(form);
                     }
@@ -94,6 +96,8 @@ pub fn App() -> Element {
     use_effect(move || {
         let Some(session_id) = selected_session() else {
             transcripts.set(Vec::new());
+            detected_question.set(None);
+            suggested_answer.set(None);
             return;
         };
 
@@ -102,7 +106,15 @@ pub fn App() -> Element {
             spawn(async move {
                 match core.list_transcript_chunks(&session_id).await {
                     Ok(rows) => {
-                        transcripts.set(rows.into_iter().map(transcript_card_from_view).collect())
+                        let rows: Vec<_> =
+                            rows.into_iter().map(transcript_card_from_view).collect();
+                        detected_question.set(
+                            rows.iter()
+                                .rev()
+                                .find(|chunk| chunk.has_question)
+                                .map(|chunk| chunk.text.clone()),
+                        );
+                        transcripts.set(rows)
                     }
                     Err(error) => app_error.set(Some(error.to_string())),
                 }
@@ -198,6 +210,11 @@ pub fn App() -> Element {
                                         page.set(Page::LiveRecording);
                                     },
                                     on_create_session: move |_| {
+                                        if saved_settings_form.read().llm_api_key_preview.is_empty() {
+                                            show_missing_api_key.set(true);
+                                            return;
+                                        }
+
                                         let Some(project_id) = selected_project() else { return; };
                                         if let Some(Ok(core)) = core.read().as_ref() {
                                             let core = core.clone();
@@ -220,9 +237,16 @@ pub fn App() -> Element {
                                 LiveRecordingPage {
                                     session: sessions.read().iter().find(|session| Some(session.id.clone()) == selected_session()).cloned(),
                                     transcripts,
+                                    detected_question: detected_question(),
+                                    suggested_answer: suggested_answer(),
                                     is_listening: is_listening(),
                                     on_start: move |_| {
                                         if is_listening() {
+                                            return;
+                                        }
+
+                                        if saved_settings_form.read().llm_api_key_preview.is_empty() {
+                                            show_missing_api_key.set(true);
                                             return;
                                         }
 
@@ -230,30 +254,31 @@ pub fn App() -> Element {
                                         let Some(session_id) = selected_session() else { return; };
                                         let Some(core) = core.read().as_ref().and_then(|result| result.as_ref().ok().cloned()) else { return; };
 
-                                        let mut runtime = match AudioRuntime::start_default() {
-                                            Ok(runtime) => runtime,
+                                        let handle = match core.start_live_session(project_id, session_id) {
+                                            Ok(handle) => handle,
                                             Err(error) => {
                                                 app_error.set(Some(error.to_string()));
                                                 return;
                                             }
                                         };
-                                        let transcriptions = runtime.transcriptions();
-                                        if let Err(error) = runtime.start() {
-                                            app_error.set(Some(error.to_string()));
-                                            return;
-                                        }
-
-                                        audio_runtime.set(Some(runtime));
+                                        let events = handle.events();
+                                        live_session.set(Some(handle));
                                         is_listening.set(true);
 
                                         spawn(async move {
                                             loop {
-                                                match transcriptions.try_recv() {
-                                                    Ok(chunk) => {
-                                                        match core.persist_transcription_chunk(&project_id, &session_id, chunk).await {
-                                                            Ok(chunk) => transcripts.write().push(transcript_card_from_view(chunk)),
-                                                            Err(error) => app_error.set(Some(error.to_string())),
+                                                match events.try_recv() {
+                                                    Ok(event) => match event {
+                                                        LiveSessionEvent::Transcript(chunk) => transcripts.write().push(transcript_card_from_view(chunk)),
+                                                        LiveSessionEvent::QuestionDetected { question, .. } => detected_question.set(Some(question)),
+                                                        LiveSessionEvent::AnswerStarted => suggested_answer.set(Some(String::new())),
+                                                        LiveSessionEvent::AnswerDelta(delta) => {
+                                                            let mut answer = suggested_answer().unwrap_or_default();
+                                                            answer.push_str(&delta);
+                                                            suggested_answer.set(Some(answer));
                                                         }
+                                                        LiveSessionEvent::AnswerFinished(answer) => suggested_answer.set(Some(answer)),
+                                                        LiveSessionEvent::Error(error) => app_error.set(Some(error)),
                                                     }
                                                     Err(crossbeam_channel::TryRecvError::Empty) => {
                                                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -264,23 +289,31 @@ pub fn App() -> Element {
                                         });
                                     },
                                     on_pause: move |_| {
-                                        if let Some(mut runtime) = audio_runtime.write().take() {
-                                            runtime.stop();
+                                        if let Some(handle) = live_session.write().take() {
+                                            if let Some(Ok(core)) = core.read().as_ref() {
+                                                core.pause_live_session(handle);
+                                            }
                                         }
                                         is_listening.set(false);
                                     },
                                     on_end: move |_| {
-                                        if let Some(mut runtime) = audio_runtime.write().take() {
-                                            runtime.stop();
-                                        }
                                         is_listening.set(false);
 
                                         let Some(session_id) = selected_session() else { return; };
                                         if let Some(Ok(core)) = core.read().as_ref() {
                                             let core = core.clone();
+                                            let handle = live_session.write().take();
                                             spawn(async move {
-                                                match core.end_session(&session_id).await {
-                                                    Ok(()) => page.set(Page::Project),
+                                                    match core.end_live_session(handle, &session_id).await {
+                                                    Ok(()) => {
+                                                        sessions.with_mut(|sessions| {
+                                                            if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
+                                                                session.status = "completed".to_string();
+                                                                session.meta = "Completed".to_string();
+                                                            }
+                                                        });
+                                                        page.set(Page::Project);
+                                                    }
                                                     Err(error) => app_error.set(Some(error.to_string())),
                                                 }
                                             });
@@ -293,14 +326,42 @@ pub fn App() -> Element {
                                     theme,
                                     settings: settings_form,
                                     saved_settings: saved_settings_form,
-                                    on_save: move |form: SettingsForm| {
+                                    whisper_model,
+                                    on_check_whisper_model: move |model_name: String| {
+                                        if let Some(Ok(core)) = core.read().as_ref() {
+                                            match core.whisper_model_status(&model_name) {
+                                                Ok(status) => whisper_model.set(Some(status)),
+                                                Err(error) => app_error.set(Some(error.to_string())),
+                                            }
+                                        }
+                                    },
+                                    on_install_whisper_model: move |model_name: String| {
                                         if let Some(Ok(core)) = core.read().as_ref() {
                                             let core = core.clone();
                                             spawn(async move {
-                                                match core.update_settings(settings_update_from_form(form)).await {
-                                                    Ok(settings) => {
-                                                        let form = settings_form_from_view(settings);
-                                                        theme.set(form.ui_theme);
+                                                match tokio::task::spawn_blocking(move || core.install_whisper_model_by_name(&model_name)).await {
+                                                    Ok(Ok(status)) => whisper_model.set(Some(status)),
+                                                    Ok(Err(error)) => app_error.set(Some(error.to_string())),
+                                                    Err(error) => app_error.set(Some(error.to_string())),
+                                                }
+                                            });
+                                        }
+                                    },
+                                    on_remove_whisper_model: move |model_name: String| {
+                                        if let Some(Ok(core)) = core.read().as_ref() {
+                                            match core.remove_whisper_model_by_name(&model_name) {
+                                                Ok(status) => whisper_model.set(Some(status)),
+                                                Err(error) => app_error.set(Some(error.to_string())),
+                                            }
+                                        }
+                                    },
+                                    on_save: move |form: SettingsFormView| {
+                                        if let Some(Ok(core)) = core.read().as_ref() {
+                                            let core = core.clone();
+                                            spawn(async move {
+                                                match core.update_settings_form(form).await {
+                                                    Ok(form) => {
+                                                        theme.set(theme_from_settings(&form.ui_theme));
                                                         settings_form.set(form.clone());
                                                         saved_settings_form.set(form);
                                                     }
@@ -311,6 +372,19 @@ pub fn App() -> Element {
                                     }
                                 }
                             },
+                        }
+                    }
+
+                    if show_missing_api_key() {
+                        div { class: "absolute inset-0 z-20 grid place-items-center bg-black/30 p-4",
+                            div { class: "w-full max-w-md rounded-lg border border-hairline bg-canvas p-5 shadow-2xl",
+                                h3 { class: "text-lg font-semibold text-ink", "API key required" }
+                                p { class: "mt-2 text-sm leading-relaxed text-body", "Add an LLM API key before starting a live session so Tayori can generate suggested answers when questions are detected." }
+                                div { class: "mt-5 flex justify-end gap-2",
+                                    button { class: "rounded-md px-4 py-2 text-sm font-semibold text-body hover:bg-surface-soft", onclick: move |_| show_missing_api_key.set(false), "Cancel" }
+                                    button { class: "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active", onclick: move |_| { show_missing_api_key.set(false); page.set(Page::Settings); }, "Add API key" }
+                                }
+                            }
                         }
                     }
                 }
@@ -331,6 +405,7 @@ fn session_card_from_view(session: SessionView) -> SessionCard {
     SessionCard {
         id: session.id,
         title: session.title,
+        status: session.status,
         meta: session.meta,
     }
 }
@@ -350,55 +425,18 @@ fn transcript_card_from_view(chunk: TranscriptChunkView) -> TranscriptCard {
         id: chunk.id,
         text: chunk.text,
         time: chunk.time,
+        chunk_index: chunk.chunk_index,
+        start_ms: chunk.start_ms,
+        end_ms: chunk.end_ms,
+        duration_ms: chunk.duration_ms,
+        has_question: chunk.has_question,
+        confidence: chunk.confidence,
     }
 }
 
 fn non_empty(value: String) -> Option<String> {
     let value = value.trim().to_string();
     if value.is_empty() { None } else { Some(value) }
-}
-
-fn default_settings_form() -> SettingsForm {
-    SettingsForm {
-        llm_provider: "OpenAI-compatible".to_string(),
-        llm_model: "gpt-4.1-mini".to_string(),
-        embedding_provider: "FastEmbed".to_string(),
-        embedding_model: "jinaai/jina-embeddings-v2-base-code".to_string(),
-        sparse_model: "prithivida/splade_pp_en_v1".to_string(),
-        reranker_model: "jinaai/jina-reranker-v1-turbo-en".to_string(),
-        whisper_model: "small-q8_0".to_string(),
-        summary_minutes: "5".to_string(),
-        ui_theme: Theme::Light,
-    }
-}
-
-fn settings_form_from_view(settings: SettingsView) -> SettingsForm {
-    SettingsForm {
-        llm_provider: settings.llm_provider,
-        llm_model: settings.llm_model,
-        embedding_provider: settings.embedding_provider,
-        embedding_model: settings.embedding_model,
-        sparse_model: settings.sparse_model,
-        reranker_model: settings.reranker_model,
-        whisper_model: settings.whisper_model,
-        summary_minutes: settings.summary_minutes.to_string(),
-        ui_theme: theme_from_settings(&settings.ui_theme),
-    }
-}
-
-fn settings_update_from_form(form: SettingsForm) -> SettingsUpdate {
-    SettingsUpdate {
-        llm_model: form.llm_model,
-        embedding_model: form.embedding_model,
-        sparse_model: form.sparse_model,
-        reranker_model: form.reranker_model,
-        whisper_model: form.whisper_model,
-        summary_minutes: form.summary_minutes.parse::<i64>().unwrap_or(5),
-        ui_theme: match form.ui_theme {
-            Theme::Light => "light".to_string(),
-            Theme::Dark => "dark".to_string(),
-        },
-    }
 }
 
 fn theme_from_settings(value: &str) -> Theme {

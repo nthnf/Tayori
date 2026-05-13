@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use lancedb::{Connection, connect};
 use sea_orm::{Database, DatabaseConnection};
 use std::path::Path;
@@ -67,8 +67,8 @@ impl Storage {
         }
 
         Err(last_error
-            .expect("database connection should have been attempted")
-            .into())
+            .map(Into::into)
+            .unwrap_or_else(|| anyhow!("sqlite connection was not attempted")))
     }
 
     async fn connect_lance_db(path: impl AsRef<Path>) -> Result<Connection> {
@@ -88,14 +88,15 @@ impl Storage {
         }
 
         Err(last_error
-            .expect("database connection should have been attempted")
-            .into())
+            .map(Into::into)
+            .unwrap_or_else(|| anyhow!("lancedb connection was not attempted")))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lance_document::LanceDocumentChunk;
     use sea_orm::ConnectionTrait;
 
     #[tokio::test]
@@ -141,6 +142,59 @@ mod tests {
                 .iter()
                 .any(|index| index.columns == ["summary"])
         );
+    }
+
+    #[tokio::test]
+    async fn document_hybrid_search_uses_dense_sparse_and_text_then_dedupes() {
+        let temp = tempfile::tempdir().unwrap();
+        let sqlite_path = temp.path().join("sqlite").join("tayori.db");
+        let lancedb_path = temp.path().join("lancedb");
+        seed_minimal_settings(&sqlite_path).await;
+        let storage = Storage::new_at(&sqlite_path, &lancedb_path).await.unwrap();
+
+        storage
+            .add_lance_document_chunk(LanceDocumentChunk {
+                id: "dense-hit".to_string(),
+                project_id: "project".to_string(),
+                document_id: "doc-a".to_string(),
+                chunk_index: 0,
+                text: "dense semantic result".to_string(),
+                dense_vector: vec![1.0, 0.0, 0.0, 0.0],
+                sparse_indices: vec![1],
+                sparse_values: vec![1.0],
+                created_at_unix_secs: 1,
+            })
+            .await
+            .unwrap();
+        storage
+            .add_lance_document_chunk(LanceDocumentChunk {
+                id: "sparse-hit".to_string(),
+                project_id: "project".to_string(),
+                document_id: "doc-b".to_string(),
+                chunk_index: 0,
+                text: "sparse keyword result".to_string(),
+                dense_vector: vec![0.0, 1.0, 0.0, 0.0],
+                sparse_indices: vec![9],
+                sparse_values: vec![3.0],
+                created_at_unix_secs: 2,
+            })
+            .await
+            .unwrap();
+
+        let hits = storage
+            .search_lance_document_chunks_hybrid(
+                "project",
+                &[1.0, 0.0, 0.0, 0.0],
+                &[9],
+                &[2.0],
+                "keyword",
+                10,
+            )
+            .await
+            .unwrap();
+
+        let ids = hits.into_iter().map(|hit| hit.id).collect::<Vec<_>>();
+        assert_eq!(ids, ["dense-hit", "sparse-hit"]);
     }
 
     async fn seed_minimal_settings(sqlite_path: &Path) {
@@ -189,7 +243,7 @@ mod tests {
             ) VALUES (
                 'default',
                 'openai',
-                'gpt-5.4-mini',
+                'gpt-4.1-mini',
                 0,
                 'fastembed',
                 'jinaai/jina-embeddings-v2-base-code',
@@ -197,7 +251,7 @@ mod tests {
                 4,
                 'jinaai/jina-reranker-v1-turbo-en',
                 5,
-                'dark',
+                'light',
                 '2026-01-01 00:00:00',
                 '2026-01-01 00:00:00'
             )",

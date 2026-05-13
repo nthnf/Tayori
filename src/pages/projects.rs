@@ -15,7 +15,7 @@ pub fn DashboardPage(
     let project_cards = projects.read().clone();
     let recent_projects = project_cards.clone();
 
-    let mut create_project = move |_| {
+    let create_project = move |_| {
         let current = draft.read().clone();
         let name = current.name.trim().to_string();
         if name.is_empty() {
@@ -107,7 +107,7 @@ pub fn DashboardPage(
                             }
                             div { class: "flex justify-end gap-2 pt-2",
                                 button { class: "rounded-md px-4 py-2 text-sm font-semibold text-body hover:bg-surface-soft", onclick: move |_| show_create.set(false), "Cancel" }
-                                button { class: if can_create { "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active" } else { "cursor-not-allowed rounded-md bg-primary-disabled px-4 py-2 text-sm font-semibold text-on-primary" }, disabled: !can_create, onclick: move |event| create_project(event), "Create" }
+                                button { class: if can_create { "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active" } else { "cursor-not-allowed rounded-md bg-primary-disabled px-4 py-2 text-sm font-semibold text-on-primary" }, disabled: !can_create, onclick: create_project, "Create" }
                             }
                         }
                     }

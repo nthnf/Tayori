@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use arrow_array::{
-    Array, FixedSizeListArray, Int64Array, ListArray, RecordBatch, StringArray,
+    Array, FixedSizeListArray, Float32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    UInt32Array,
     types::{Float32Type, UInt32Type},
 };
 use futures::TryStreamExt;
@@ -190,7 +191,56 @@ impl Storage {
         document_chunk_results_from_batches(&batches)
     }
 
-    /// Search document chunks with dense vector + full-text retrieval.
+    /// Search document chunks by sparse-vector dot product inside a project.
+    ///
+    /// LanceDB stores sparse embeddings as active index/value arrays. Until we
+    /// use a native sparse index, this scans project rows, computes sparse dot
+    /// product in Rust, sorts by score, and returns the top matches. This still
+    /// exercises the second embedding type and keeps sparse retrieval correct for
+    /// small/medium local projects.
+    pub async fn search_lance_document_chunks_by_sparse(
+        &self,
+        project_id: &str,
+        sparse_indices: &[u32],
+        sparse_values: &[f32],
+        limit: usize,
+    ) -> Result<Vec<LanceDocumentChunkResult>> {
+        ensure!(
+            sparse_indices.len() == sparse_values.len(),
+            "query sparse indices length {} does not match values length {}",
+            sparse_indices.len(),
+            sparse_values.len()
+        );
+        if limit == 0 || sparse_indices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let table = self
+            .lancedb
+            .open_table(DOCUMENT_CHUNKS_TABLE)
+            .execute()
+            .await?;
+        let batches = table
+            .query()
+            .select(Select::Columns(document_chunk_sparse_columns()))
+            .only_if(format!("project_id = '{}'", escape_sql_string(project_id)))
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let mut scored =
+            scored_document_chunk_results_from_batches(&batches, sparse_indices, sparse_values)?;
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        Ok(scored
+            .into_iter()
+            .filter(|(score, _)| *score > 0.0)
+            .take(limit)
+            .map(|(_, result)| result)
+            .collect())
+    }
+
+    /// Search document chunks with dense vector + sparse vector + full-text retrieval.
     ///
     /// LanceDB returns one ranked list per query type. We keep the merge simple
     /// and deterministic: vector hits first, text hits second, deduped by Lance
@@ -199,6 +249,8 @@ impl Storage {
         &self,
         project_id: &str,
         dense_vector: &[f32],
+        sparse_indices: &[u32],
+        sparse_values: &[f32],
         text_query: &str,
         limit: usize,
     ) -> Result<Vec<LanceDocumentChunkResult>> {
@@ -212,9 +264,18 @@ impl Storage {
         let text_results = self
             .search_lance_document_chunks_by_text(project_id, text_query, limit)
             .await?;
+        let sparse_results = self
+            .search_lance_document_chunks_by_sparse(
+                project_id,
+                sparse_indices,
+                sparse_values,
+                limit,
+            )
+            .await?;
 
         Ok(merge_document_chunk_results(
             vector_results,
+            sparse_results,
             text_results,
             limit,
         ))
@@ -223,13 +284,18 @@ impl Storage {
 
 fn merge_document_chunk_results(
     vector_results: Vec<LanceDocumentChunkResult>,
+    sparse_results: Vec<LanceDocumentChunkResult>,
     text_results: Vec<LanceDocumentChunkResult>,
     limit: usize,
 ) -> Vec<LanceDocumentChunkResult> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
 
-    for result in vector_results.into_iter().chain(text_results) {
+    for result in vector_results
+        .into_iter()
+        .chain(sparse_results)
+        .chain(text_results)
+    {
         if seen.insert(result.id.clone()) {
             merged.push(result);
         }
@@ -240,6 +306,13 @@ fn merge_document_chunk_results(
     }
 
     merged
+}
+
+fn document_chunk_sparse_columns() -> Vec<String> {
+    let mut columns = document_chunk_result_columns();
+    columns.push("sparse_indices".to_string());
+    columns.push("sparse_values".to_string());
+    columns
 }
 
 fn document_chunk_result_columns() -> Vec<String> {
@@ -284,6 +357,60 @@ fn document_chunk_results_from_batches(
     Ok(results)
 }
 
+fn scored_document_chunk_results_from_batches(
+    batches: &[RecordBatch],
+    query_indices: &[u32],
+    query_values: &[f32],
+) -> Result<Vec<(f32, LanceDocumentChunkResult)>> {
+    let mut results = Vec::new();
+
+    for batch in batches {
+        let base = document_chunk_results_from_batches(std::slice::from_ref(batch))?;
+        let sparse_indices = list_column(batch, "sparse_indices")?;
+        let sparse_values = list_column(batch, "sparse_values")?;
+
+        for (row, result) in base.into_iter().enumerate() {
+            let indices = sparse_indices
+                .value(row)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .context("LanceDB sparse_indices values are not UInt32")?
+                .values()
+                .to_vec();
+            let values = sparse_values
+                .value(row)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .context("LanceDB sparse_values values are not Float32")?
+                .values()
+                .to_vec();
+            results.push((
+                sparse_dot(query_indices, query_values, &indices, &values),
+                result,
+            ));
+        }
+    }
+
+    Ok(results)
+}
+
+fn sparse_dot(
+    left_indices: &[u32],
+    left_values: &[f32],
+    right_indices: &[u32],
+    right_values: &[f32],
+) -> f32 {
+    let mut score = 0.0;
+    for (left_index, left_value) in left_indices.iter().zip(left_values) {
+        for (right_index, right_value) in right_indices.iter().zip(right_values) {
+            if left_index == right_index {
+                score += left_value * right_value;
+            }
+        }
+    }
+    score
+}
+
 fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
     batch
         .column_by_name(name)
@@ -300,6 +427,15 @@ fn int64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array
         .as_any()
         .downcast_ref::<Int64Array>()
         .with_context(|| format!("LanceDB column is not Int64: {name}"))
+}
+
+fn list_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray> {
+    batch
+        .column_by_name(name)
+        .with_context(|| format!("missing LanceDB list column: {name}"))?
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .with_context(|| format!("LanceDB column is not List: {name}"))
 }
 
 fn document_chunk_batch(row: LanceDocumentChunk, embedding_dimension: i32) -> Result<RecordBatch> {
@@ -426,7 +562,7 @@ mod tests {
         let text_results = document_chunk_results_from_batches(&text_batches).unwrap();
         assert_eq!(text_results[0].document_id, "doc-1");
 
-        let merged = merge_document_chunk_results(vector_results, text_results, 10);
+        let merged = merge_document_chunk_results(vector_results, Vec::new(), text_results, 10);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].id, "chunk-1");
 
@@ -444,6 +580,39 @@ mod tests {
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             0
+        );
+    }
+
+    #[test]
+    fn sparse_dot_scores_matching_dimensions() {
+        let score = sparse_dot(&[1, 2, 4], &[0.5, 1.0, 2.0], &[2, 3, 4], &[3.0, 9.0, 4.0]);
+
+        assert_eq!(score, 11.0);
+    }
+
+    #[test]
+    fn hybrid_merge_dedupes_vector_sparse_and_text_hits_in_order() {
+        fn hit(id: &str) -> LanceDocumentChunkResult {
+            LanceDocumentChunkResult {
+                id: id.to_string(),
+                project_id: "project".to_string(),
+                document_id: "doc".to_string(),
+                chunk_index: 0,
+                text: id.to_string(),
+                created_at_unix_secs: 0,
+            }
+        }
+
+        let merged = merge_document_chunk_results(
+            vec![hit("dense"), hit("shared")],
+            vec![hit("sparse"), hit("shared")],
+            vec![hit("text"), hit("dense")],
+            10,
+        );
+
+        assert_eq!(
+            merged.into_iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            ["dense", "shared", "sparse", "text"]
         );
     }
 }

@@ -6,7 +6,7 @@ use fastembed::{
 };
 
 /// Sparse vector in the shape storage expects for LanceDB rows.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SparseVector {
     pub indices: Vec<u32>,
     pub values: Vec<f32>,

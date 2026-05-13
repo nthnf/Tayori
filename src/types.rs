@@ -38,20 +38,8 @@ pub struct DocumentCard {
 pub struct SessionCard {
     pub id: String,
     pub title: String,
+    pub status: String,
     pub meta: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettingsForm {
-    pub llm_provider: String,
-    pub llm_model: String,
-    pub embedding_provider: String,
-    pub embedding_model: String,
-    pub sparse_model: String,
-    pub reranker_model: String,
-    pub whisper_model: String,
-    pub summary_minutes: String,
-    pub ui_theme: Theme,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,4 +47,10 @@ pub struct TranscriptCard {
     pub id: String,
     pub text: String,
     pub time: String,
+    pub chunk_index: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub duration_ms: i64,
+    pub has_question: bool,
+    pub confidence: u8,
 }

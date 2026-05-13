@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 const DEFAULT_CHUNK_MAX_CHARS: usize = 2_400;
 const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 240;
+const MAX_DOCUMENT_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Result of ingesting one local document.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +81,14 @@ pub async fn upload_document_with_options(
     let path = path.as_ref();
     ensure!(path.is_file(), "document path is not a file: {path:?}");
     ensure_supported_extension(path)?;
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to read document metadata: {path:?}"))?;
+    ensure!(
+        metadata.len() <= MAX_DOCUMENT_BYTES,
+        "document is too large: {} bytes exceeds {} bytes",
+        metadata.len(),
+        MAX_DOCUMENT_BYTES
+    );
 
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to read document: {path:?}"))?;
@@ -263,7 +272,10 @@ fn ensure_supported_extension(path: &Path) -> Result<()> {
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     ensure!(
-        matches!(extension.as_str(), "txt" | "md" | "markdown"),
+        matches!(
+            extension.as_str(),
+            "txt" | "md" | "markdown" | "csv" | "json"
+        ),
         "unsupported document extension: {extension}"
     );
     Ok(())
@@ -301,7 +313,8 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<String>
         if end == chars.len() {
             break;
         }
-        start = end.saturating_sub(overlap_chars);
+        let next_start = end.saturating_sub(overlap_chars);
+        start = if next_start <= start { end } else { next_start };
     }
 
     chunks
@@ -329,6 +342,14 @@ mod tests {
     }
 
     #[test]
+    fn chunk_text_always_advances_when_boundary_is_near_start() {
+        let chunks = chunk_text("a. b. c. d. e.", 4, 3);
+
+        assert!(!chunks.is_empty());
+        assert!(chunks.len() < 10);
+    }
+
+    #[test]
     fn content_hash_is_stable() {
         assert_eq!(content_hash_hex(b"abc"), content_hash_hex(b"abc"));
     }
@@ -337,6 +358,8 @@ mod tests {
     fn supported_extensions_are_text_like() {
         ensure_supported_extension(&PathBuf::from("notes.md")).unwrap();
         ensure_supported_extension(&PathBuf::from("notes.txt")).unwrap();
+        ensure_supported_extension(&PathBuf::from("notes.csv")).unwrap();
+        ensure_supported_extension(&PathBuf::from("notes.json")).unwrap();
         assert!(ensure_supported_extension(&PathBuf::from("notes.pdf")).is_err());
     }
 }

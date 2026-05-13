@@ -1,65 +1,44 @@
 # Tayori
 
-Tayori is an early-stage local-first meeting/audio assistant for Linux.
+Tayori is a local-first desktop assistant for live meetings and project documents.
 
-The current prototype captures system audio, detects speech, and transcribes it locally with Whisper models through `whisper-rs` / `whisper.cpp`. It is currently a developer prototype, not a packaged desktop app yet.
+It records local audio, transcribes speech with a local Whisper model, detects questions in the transcript, searches your project documents/transcript summaries, and streams a suggested answer from an OpenAI-compatible LLM. Project data is stored locally in SQLite; retrieval indexes are stored locally in LanceDB; the LLM API key is stored in your OS keyring.
 
-## What works today
+Tayori is still early software. It is currently aimed at Linux users who are comfortable building from source.
 
-- Capture system/output audio on Linux through CPAL + PipeWire.
-- Convert captured audio into mono 16 kHz frames for VAD/STT.
-- Detect speech activity with Silero VAD.
-- Transcribe speech locally with Whisper `ggml` models.
-- Run a terminal STT demo.
-- Record processed STT audio to a WAV file for debugging.
+## Features
 
-## Current limitations
+- Desktop UI built with Dioxus.
+- Local speech-to-text with Whisper `ggml` models.
+- Voice activity detection with Silero VAD.
+- Local SQLite database for projects, sessions, documents, transcripts, and answers.
+- LanceDB-backed hybrid retrieval for project documents and transcript summaries.
+- OpenAI-compatible answer generation.
+- OS keyring storage for the single configured LLM API key.
+- Local document upload for text-like files: `txt`, `md`, `markdown`, `csv`, `json`.
 
-- Linux only.
-- The current capture path targets system/output audio, not the user's microphone.
-- The app is not packaged yet; run it through Cargo or the release binary.
-- Local transcription performance depends heavily on the selected Whisper model and GPU/CPU.
-- The current demo is for development/testing and may print repeated partial transcription output.
+## Current Limits
 
-## Repository layout
+- Linux is the primary supported platform right now.
+- Packaging is not finished; build and run from source.
+- Live audio/STT depends on your system audio setup and local Whisper model performance.
+- Document ingestion currently expects UTF-8 text-like files.
+- The LLM provider is currently OpenAI-compatible only.
 
-```txt
-.
-├── crates/
-│   ├── audio/      # audio capture, resampling, rolling buffer, VAD, snapshot scheduling
-│   ├── core/       # demo binaries and orchestration experiments
-│   ├── detection/  # question/usefulness detection experiments
-│   ├── llm/        # LLM provider integration experiments
-│   ├── rag/        # retrieval/embedding experiments
-│   ├── storage/    # persistence experiments
-│   └── stt/        # Whisper model paths, STT jobs, queue, and engine
-├── migration/      # database migrations
-└── README.md
-```
+## System Dependencies
 
-## System requirements
+You need:
 
-### Required
-
-- Linux with PipeWire.
-- Rust stable toolchain.
-- Cargo.
+- Rust stable toolchain and Cargo.
 - C/C++ build tools.
 - CMake.
-- Clang/libclang for bindgen-based native builds.
-- PipeWire development libraries.
-- PulseAudio/PipeWire Pulse compatibility libraries.
+- Clang and libclang for native Rust crates that use bindgen.
+- PipeWire/PulseAudio compatibility libraries for audio capture.
+- WebKitGTK/GTK libraries for the desktop webview.
+- Secret Service/keyring support for API key storage.
+- `curl` for downloading Whisper models through the bundled installer script.
 
-### Recommended
-
-- Dedicated GPU for local Whisper inference.
-- Vulkan runtime and headers if building `whisper-rs` with Vulkan support.
-- 16 GB RAM or more for comfortable local development.
-- A small English Whisper model for live/local testing.
-
-## Arch / Omarchy setup
-
-On Arch-based systems, start with:
+On Arch Linux, this is a practical starting point:
 
 ```bash
 sudo pacman -S --needed \
@@ -71,120 +50,143 @@ sudo pacman -S --needed \
   pipewire-pulse \
   pipewire-alsa \
   alsa-lib \
-  vulkan-headers \
-  vulkan-icd-loader
+  webkit2gtk-4.1 \
+  gtk3 \
+  libsecret \
+  curl
 ```
 
-For AMD GPUs, make sure your Mesa/Vulkan driver is installed. For example:
+For GPU/Vulkan-enabled native dependencies, also install your Vulkan runtime. For AMD on Arch:
 
 ```bash
-sudo pacman -S --needed mesa vulkan-radeon
+sudo pacman -S --needed mesa vulkan-radeon vulkan-headers vulkan-icd-loader
 ```
 
-Useful GPU monitoring tools:
+Package names vary by distribution. On Debian/Ubuntu, look for equivalents such as `build-essential`, `cmake`, `clang`, `libclang-dev`, `libpipewire-0.3-dev`, `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, and `libsecret-1-dev`.
+
+## Install Rust
+
+If Rust is not installed, use rustup:
 
 ```bash
-sudo pacman -S --needed nvtop
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup default stable
 ```
 
-Optional AMD-specific monitor:
+## Get The Source
 
 ```bash
-paru -S amdgpu_top
+git clone <repo-url> tayori
+cd tayori
 ```
 
-## Whisper models
+## Install A Whisper Model
 
-Tayori expects Whisper `ggml` model files under the app data directory.
-
-Default path shape:
+Tayori uses local Whisper `ggml` model files stored under:
 
 ```txt
-$XDG_DATA_HOME/tayori/models/whisper/<model-file>
+$XDG_DATA_HOME/tayori/models/whisper
 ```
 
-If `XDG_DATA_HOME` is not set:
+If `XDG_DATA_HOME` is not set, the default is:
 
 ```txt
-~/.local/share/tayori/models/whisper/<model-file>
+~/.local/share/tayori/models/whisper
 ```
 
-Example:
+Install the default practical model:
 
-```txt
-~/.local/share/tayori/models/whisper/ggml-small.en.bin
+```bash
+scripts/install-model.sh download --model small-q8_0
 ```
 
-The STT crate default currently points at:
+List available models:
 
-```txt
-ggml-large-v3-turbo-q5_0.bin
+```bash
+scripts/install-model.sh list
 ```
 
-Some demos may override this in code. For practical local testing, `small.en` or another small English model is recommended.
+The app can also trigger this installer from Rust when you change the Whisper model in Settings.
 
 ## Build
 
-```bash
-cargo build --release -p core
-```
-
-## Run STT demo
-
-With logs:
+Debug build:
 
 ```bash
-target/release/stt_demo
+cargo build
 ```
 
-Transcript-only mode:
+Release build:
 
 ```bash
-QUIET=1 target/release/stt_demo
+cargo build --release
 ```
 
-Stop with:
+The release binary will be at:
 
 ```txt
-Ctrl+C
+target/release/tayori
 ```
 
-## Record processed STT audio
+## Run
 
-This records the same processed audio stream used by VAD/STT: mono, 16 kHz, 16-bit WAV.
+From source:
 
 ```bash
-cargo run --release -p core --bin capture_wav_demo
+cargo run
 ```
 
-Custom duration:
+Or after release build:
 
 ```bash
-cargo run --release -p core --bin capture_wav_demo -- --seconds 30
+target/release/tayori
 ```
 
-Custom output path:
+## First Run
+
+1. Open Settings.
+2. Click `Manage` for the API key.
+3. Add your OpenAI-compatible API key.
+4. Confirm the Whisper model is installed, for example `small-q8_0`.
+5. Create a project.
+6. Upload text-like documents if you want project context.
+7. Create a live session and start recording.
+
+The API key is stored in your OS keyring, not plaintext SQLite. Tayori stores only a marker indicating that the key belongs in the keyring.
+
+## Data Locations
+
+Tayori stores app data under your platform app-data directory. On Linux this is usually:
+
+```txt
+~/.local/share/tayori
+```
+
+Typical contents:
+
+```txt
+~/.local/share/tayori/db/          # SQLite and LanceDB data
+~/.local/share/tayori/models/      # local Whisper models
+```
+
+Uploaded documents are not copied for the current MVP. Tayori stores the original path, document metadata, chunk text, and retrieval vectors.
+
+## Developer Checks
+
+Run tests for the core orchestration layer:
 
 ```bash
-cargo run --release -p core --bin capture_wav_demo -- --out /tmp/tayori-test.wav
+cargo test -p core
 ```
 
-Play the output:
+Run workspace clippy:
 
 ```bash
-pw-play /tmp/tayori-test.wav
+cargo clippy --workspace --all-targets
 ```
 
-This is meant for debugging what Whisper receives. It is not full-quality meeting playback audio.
+Run a full check:
 
-## Development notes
-
-The audio crate currently depends on CPAL from a pinned Git revision with `pipewire` and `pulseaudio` features enabled.
-
-The STT crate currently uses `whisper-rs` with Vulkan support enabled.
-
-The current performance bottleneck is local Whisper inference, not the Rust audio pipeline. Smaller English models are much more practical for low-latency local testing than medium/large models.
-
-## License
-
-Not specified yet.
+```bash
+cargo check
+```

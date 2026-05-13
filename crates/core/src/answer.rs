@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use llm::{ChatMessage, ChatRequest, ChatStream, LlmClient};
+use llm::{ChatStream, LlmClient};
 use sea_orm::{ActiveModelTrait, Set};
 use std::pin::Pin;
 use storage::{entities::session_answers, storage::Storage};
@@ -15,7 +15,7 @@ pub async fn stream_answer(
     question: &str,
     context: &str,
 ) -> Result<ChatStream> {
-    llm.stream_chat(answer_request(model, question, context))
+    llm.stream_answer_from_context(model, question, context)
         .await
 }
 
@@ -63,16 +63,4 @@ pub async fn persist_answer(
     }
     .insert(&storage.sqlite)
     .await?)
-}
-
-fn answer_request(model: &str, question: &str, context: &str) -> ChatRequest {
-    ChatRequest::new(
-        model,
-        vec![
-            ChatMessage::system(
-                "Answer meeting questions using only the supplied context when relevant. Be concise.",
-            ),
-            ChatMessage::user(format!("Context:\n{context}\n\nQuestion:\n{question}")),
-        ],
-    )
 }

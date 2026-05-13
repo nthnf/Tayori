@@ -64,7 +64,7 @@ pub fn app_data_dir() -> PathBuf {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                let home = std::env::var_os("HOME").expect("HOME is not set");
+                let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
                 PathBuf::from(home).join(".local/share")
             })
             .join("tayori")
