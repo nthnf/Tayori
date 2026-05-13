@@ -115,6 +115,7 @@ async fn create_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                         )),
                 )
                 .col(ColumnDef::new(Settings::EmbeddingModel).string().not_null())
+                .col(ColumnDef::new(Settings::SparseModel).string().not_null())
                 .col(
                     ColumnDef::new(Settings::EmbeddingDimension)
                         .integer()
@@ -174,6 +175,7 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Settings::LlmStoreResponses,
             Settings::EmbeddingProvider,
             Settings::EmbeddingModel,
+            Settings::SparseModel,
             Settings::EmbeddingDimension,
             Settings::RerankerModel,
             Settings::SummaryMinutes,
@@ -186,6 +188,7 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             0.into(),
             "fastembed".into(),
             "jinaai/jina-embeddings-v2-base-code".into(),
+            "prithivida/splade_pp_en_v1".into(),
             768.into(),
             "jinaai/jina-reranker-v1-turbo-en".into(),
             5.into(),
@@ -723,6 +726,7 @@ enum Settings {
     LlmStoreResponses,
     EmbeddingProvider,
     EmbeddingModel,
+    SparseModel,
     EmbeddingDimension,
     RerankerModel,
     WhisperModel,

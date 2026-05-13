@@ -19,7 +19,15 @@ pub trait DocumentEmbedder: Send + Sync {
     fn embed<'a>(
         &'a self,
         text: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<DocumentEmbedding>> + Send + 'a>>;
+}
+
+/// Dense and sparse embeddings for one chunk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentEmbedding {
+    pub dense_vector: Vec<f32>,
+    pub sparse_indices: Vec<u32>,
+    pub sparse_values: Vec<f32>,
 }
 
 /// Result of ingesting one local document.
@@ -158,7 +166,7 @@ async fn ingest_document_chunks(
     ensure!(!chunks.is_empty(), "document contains no text to ingest");
 
     for (index, chunk) in chunks.iter().enumerate() {
-        let vector = embedder.embed(chunk).await?;
+        let embedding = embedder.embed(chunk).await?;
         storage
             .add_lance_document_chunk(LanceDocumentChunk {
                 id: Uuid::new_v4().to_string(),
@@ -166,7 +174,9 @@ async fn ingest_document_chunks(
                 document_id: document_id.to_string(),
                 chunk_index: index as i64,
                 text: chunk.clone(),
-                vector,
+                dense_vector: embedding.dense_vector,
+                sparse_indices: embedding.sparse_indices,
+                sparse_values: embedding.sparse_values,
                 created_at_unix_secs: Utc::now().timestamp(),
             })
             .await?;

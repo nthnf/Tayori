@@ -64,7 +64,7 @@ impl Storage {
             .execute()
             .await?;
 
-        ensure_vector_index(&table, "vector").await?;
+        ensure_vector_index(&table, "dense_vector").await?;
         ensure_index(
             &table,
             "text",
@@ -82,7 +82,7 @@ impl Storage {
             .execute()
             .await?;
 
-        ensure_vector_index(&table, "vector").await?;
+        ensure_vector_index(&table, "dense_vector").await?;
         ensure_index(
             &table,
             "summary",
@@ -141,8 +141,8 @@ async fn ensure_vector_index(table: &Table, column: &str) -> Result<()> {
     // 2. Vector index: LanceDB builds an ANN index for faster nearest-neighbor
     //    search once there is enough data.
     //
-    // Like text indexes, vector indexes are per table/column. If `vector` is
-    // already indexed, skip creation so startup stays idempotent.
+    // Like text indexes, vector indexes are per table/column. If the dense
+    // vector column is already indexed, skip creation so startup stays idempotent.
     let indexes = table.list_indices().await?;
     if indexes.iter().any(|index| {
         index

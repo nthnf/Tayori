@@ -1,13 +1,14 @@
 use anyhow::{Context, Result, ensure};
 use arrow_array::{
-    Array, FixedSizeListArray, Int64Array, RecordBatch, StringArray, types::Float32Type,
+    Array, FixedSizeListArray, Int64Array, ListArray, RecordBatch, StringArray,
+    types::{Float32Type, UInt32Type},
 };
 use futures::TryStreamExt;
 use lancedb::{
     index::scalar::FullTextSearchQuery,
     query::{ExecutableQuery, QueryBase, Select},
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::lance_schema::transcript_summary_schema;
 use crate::lance_table::TRANSCRIPT_SUMMARIES_TABLE;
@@ -41,8 +42,12 @@ pub struct LanceTranscriptSummary {
     pub duration_ms: i64,
     /// Summary text used for full-text search and context display.
     pub summary: String,
-    /// Embedding vector for semantic search.
-    pub vector: Vec<f32>,
+    /// Dense embedding vector for semantic search.
+    pub dense_vector: Vec<f32>,
+    /// Sparse embedding dimensions with non-zero weights.
+    pub sparse_indices: Vec<u32>,
+    /// Sparse embedding weights aligned with `sparse_indices`.
+    pub sparse_values: Vec<f32>,
     /// Creation time as unix seconds.
     pub created_at_unix_secs: i64,
 }
@@ -75,10 +80,16 @@ impl Storage {
     pub async fn add_lance_transcript_summary(&self, row: LanceTranscriptSummary) -> Result<()> {
         let embedding_dimension = self.embedding_dimension().await?;
         ensure!(
-            row.vector.len() == embedding_dimension as usize,
-            "transcript summary vector length {} does not match embedding dimension {}",
-            row.vector.len(),
+            row.dense_vector.len() == embedding_dimension as usize,
+            "transcript summary dense vector length {} does not match embedding dimension {}",
+            row.dense_vector.len(),
             embedding_dimension
+        );
+        ensure!(
+            row.sparse_indices.len() == row.sparse_values.len(),
+            "transcript summary sparse indices length {} does not match sparse values length {}",
+            row.sparse_indices.len(),
+            row.sparse_values.len()
         );
 
         let table = self
@@ -156,6 +167,7 @@ impl Storage {
         let batches = table
             .query()
             .nearest_to(vector)?
+            .column("dense_vector")
             .select(Select::Columns(transcript_summary_result_columns()))
             .only_if(format!("project_id = '{}'", escape_sql_string(project_id)))
             .limit(limit)
@@ -192,6 +204,56 @@ impl Storage {
 
         transcript_summary_results_from_batches(&batches)
     }
+
+    /// Search transcript summaries with dense vector + full-text retrieval.
+    ///
+    /// Vector results are kept first because they represent semantic similarity;
+    /// full-text results then fill gaps. Duplicate Lance row IDs are removed.
+    pub async fn search_lance_transcript_summaries_hybrid(
+        &self,
+        project_id: &str,
+        dense_vector: &[f32],
+        text_query: &str,
+        limit: usize,
+    ) -> Result<Vec<LanceTranscriptSummaryResult>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let vector_results = self
+            .search_lance_transcript_summaries_by_vector(project_id, dense_vector, limit)
+            .await?;
+        let text_results = self
+            .search_lance_transcript_summaries_by_text(project_id, text_query, limit)
+            .await?;
+
+        Ok(merge_transcript_summary_results(
+            vector_results,
+            text_results,
+            limit,
+        ))
+    }
+}
+
+fn merge_transcript_summary_results(
+    vector_results: Vec<LanceTranscriptSummaryResult>,
+    text_results: Vec<LanceTranscriptSummaryResult>,
+    limit: usize,
+) -> Vec<LanceTranscriptSummaryResult> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+
+    for result in vector_results.into_iter().chain(text_results) {
+        if seen.insert(result.id.clone()) {
+            merged.push(result);
+        }
+
+        if merged.len() == limit {
+            break;
+        }
+    }
+
+    merged
 }
 
 fn transcript_summary_result_columns() -> Vec<String> {
@@ -274,7 +336,9 @@ fn transcript_summary_batch(
     embedding_dimension: i32,
 ) -> Result<RecordBatch> {
     let schema = transcript_summary_schema(embedding_dimension);
-    let vector = row.vector.into_iter().map(Some).collect::<Vec<_>>();
+    let dense_vector = row.dense_vector.into_iter().map(Some).collect::<Vec<_>>();
+    let sparse_indices = row.sparse_indices.into_iter().map(Some).collect::<Vec<_>>();
+    let sparse_values = row.sparse_values.into_iter().map(Some).collect::<Vec<_>>();
 
     Ok(RecordBatch::try_new(
         schema,
@@ -291,10 +355,16 @@ fn transcript_summary_batch(
             Arc::new(StringArray::from(vec![row.summary])),
             Arc::new(
                 FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                    [Some(vector)],
+                    [Some(dense_vector)],
                     embedding_dimension,
                 ),
             ),
+            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>([Some(
+                sparse_indices,
+            )])),
+            Arc::new(ListArray::from_iter_primitive::<Float32Type, _, _>([Some(
+                sparse_values,
+            )])),
             Arc::new(Int64Array::from(vec![row.created_at_unix_secs])),
         ],
     )?)
@@ -336,7 +406,9 @@ mod tests {
                         end_ms: 300_000,
                         duration_ms: 300_000,
                         summary: "discussion about rust ownership".to_string(),
-                        vector: vec![1.0, 0.0, 0.0, 0.0],
+                        dense_vector: vec![1.0, 0.0, 0.0, 0.0],
+                        sparse_indices: vec![42],
+                        sparse_values: vec![0.7],
                         created_at_unix_secs: 1_700_000_000,
                     },
                     DIM,
@@ -395,6 +467,10 @@ mod tests {
         );
         let text_results = transcript_summary_results_from_batches(&text_batches).unwrap();
         assert_eq!(text_results[0].session_id, "session-1");
+
+        let merged = merge_transcript_summary_results(vector_results, text_results, 10);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "summary-1");
 
         table.delete("id = 'summary-1'").await.unwrap();
 

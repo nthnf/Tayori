@@ -13,6 +13,7 @@ pub struct Model {
     pub llm_store_responses: i64,
     pub embedding_provider: String,
     pub embedding_model: String,
+    pub sparse_model: String,
     pub embedding_dimension: i64,
     pub reranker_model: String,
     pub whisper_model: Option<String>,

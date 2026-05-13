@@ -15,10 +15,13 @@ members = [
   "crates/core",
   "crates/detection",
   "crates/llm",
-  "crates/rag",
   "crates/storage",
   "crates/stt",
+  "crates/embedding",
 ]
+
+[patch.crates-io]
+silero-vad-rust = { path = "crates/vendor/silero-vad-rust" }
 
 [dependencies]
 dioxus = { version = "0.7.7", features = [] }
