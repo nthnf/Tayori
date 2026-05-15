@@ -9,6 +9,8 @@ pub fn ProjectDetailPage(
     sessions: Signal<Vec<SessionCard>>,
     on_upload_document: EventHandler<MouseEvent>,
     on_open_session: EventHandler<String>,
+    on_delete_document: EventHandler<String>,
+    on_delete_session: EventHandler<String>,
     on_create_session: EventHandler<MouseEvent>,
 ) -> Element {
     let project_name = project
@@ -36,17 +38,18 @@ pub fn ProjectDetailPage(
                     }
 
                     div { class: "min-h-0 overflow-hidden rounded-lg border border-hairline",
-                        div { class: "grid grid-cols-[1fr_140px_110px] gap-3 border-b border-hairline bg-surface-soft px-4 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted",
+                        div { class: "grid grid-cols-[1fr_120px_100px_80px] gap-3 border-b border-hairline bg-surface-soft px-4 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted",
                             span { "File" }
                             span { "Type" }
                             span { "Status" }
+                            span { "Actions" }
                         }
                         div { class: "max-h-full overflow-auto divide-y divide-hairline",
                             if documents.read().is_empty() {
                                 div { class: "p-6 text-center text-sm text-body", "No documents uploaded yet." }
                             }
                             for document in documents.read().clone() {
-                                DocumentRow { document }
+                                DocumentRow { document, on_delete: move |document_id| on_delete_document.call(document_id) }
                             }
                         }
                     }
@@ -66,7 +69,7 @@ pub fn ProjectDetailPage(
                         div { class: "p-4 text-center text-sm text-body", "No sessions yet." }
                     }
                     for session in sessions.read().clone() {
-                        SessionRow { session, onclick: move |session_id| on_open_session.call(session_id) }
+                        SessionRow { session, onclick: move |session_id| on_open_session.call(session_id), on_delete: move |session_id| on_delete_session.call(session_id) }
                     }
                 }
             }
@@ -75,27 +78,35 @@ pub fn ProjectDetailPage(
 }
 
 #[component]
-fn DocumentRow(document: DocumentCard) -> Element {
+fn DocumentRow(document: DocumentCard, on_delete: EventHandler<String>) -> Element {
     rsx! {
-        div { class: "grid grid-cols-[1fr_140px_110px] gap-3 px-4 py-3 hover:bg-surface-soft",
+        div { class: "grid grid-cols-[1fr_120px_100px_80px] gap-3 px-4 py-3 hover:bg-surface-soft",
             div {
                 p { class: "font-semibold text-ink", "{document.name}" }
                 p { class: "text-sm text-body", "{document.meta}" }
             }
             span { class: "self-center text-sm text-body", "{document.kind}" }
             span { class: "self-center rounded-full bg-surface-strong px-3 py-1 text-center text-xs font-semibold text-ink", "{document.status}" }
+            button { class: "self-center rounded-md bg-semantic-down/10 px-3 py-1.5 text-xs font-semibold text-semantic-down hover:bg-semantic-down/20", onclick: move |_| on_delete.call(document.id.clone()), "Delete" }
         }
     }
 }
 
 #[component]
-fn SessionRow(session: SessionCard, onclick: EventHandler<String>) -> Element {
+fn SessionRow(
+    session: SessionCard,
+    onclick: EventHandler<String>,
+    on_delete: EventHandler<String>,
+) -> Element {
     let session_id = session.id.clone();
 
     rsx! {
-        button { class: "mb-2 w-full rounded-md px-3 py-3 text-left hover:bg-surface-soft", onclick: move |_| onclick.call(session_id.clone()),
-            p { class: "font-semibold text-ink", "{session.title}" }
-            p { class: "mt-1 text-sm text-body", "{session.meta}" }
+        div { class: "mb-2 grid grid-cols-[1fr_auto] gap-2 rounded-md px-3 py-3 hover:bg-surface-soft",
+            button { class: "text-left", onclick: move |_| onclick.call(session_id.clone()),
+                p { class: "font-semibold text-ink", "{session.title}" }
+                p { class: "mt-1 text-sm text-body", "{session.meta}" }
+            }
+            button { class: "self-center rounded-md bg-semantic-down/10 px-3 py-1.5 text-xs font-semibold text-semantic-down hover:bg-semantic-down/20", onclick: move |_| on_delete.call(session.id.clone()), "Delete" }
         }
     }
 }

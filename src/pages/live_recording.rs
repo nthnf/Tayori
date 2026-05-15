@@ -48,24 +48,24 @@ pub fn LiveRecordingPage(
                 }
             }
 
-            div { class: "grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,4fr)_minmax(220px,1fr)]",
-                section { class: "grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden",
-                    div { class: "rounded-lg border border-hairline bg-surface-soft p-5",
+            div { class: "grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,3fr)_minmax(280px,1fr)]",
+                section { class: "min-h-0 overflow-auto rounded-lg border border-hairline bg-surface-dark p-4 text-on-dark shadow-sm",
+                    div { class: "border-l-4 border-primary bg-surface-dark-elevated px-5 py-4 font-mono text-sm leading-relaxed text-on-dark-soft",
                         div { class: "mb-3 flex items-center justify-between gap-3",
-                            p { class: "text-xs font-semibold uppercase tracking-[0.08em] text-muted", "Detected question" }
+                            span { class: "text-xs font-semibold uppercase tracking-[0.12em] text-on-dark-soft", "Detected question" }
                             if let Some(latest) = transcript_chunks.iter().rev().find(|chunk| chunk.has_question) {
-                                span { class: "rounded-full bg-canvas px-3 py-1 text-xs font-semibold text-primary", "Confidence {latest.confidence}%" }
+                                span { class: "rounded-sm bg-primary/20 px-2 py-1 text-xs font-semibold text-on-dark", "confidence {latest.confidence}%" }
                             }
                         }
-                        h3 { class: "text-2xl font-semibold tracking-[-0.02em] text-ink", "{question}" }
+                        p { class: "whitespace-pre-wrap text-base leading-7 text-on-dark", "{question}" }
                     }
 
-                    div { class: "min-h-0 overflow-auto rounded-lg border border-hairline bg-canvas p-5",
-                        div { class: "mb-4 border-b border-hairline pb-3",
-                            h3 { class: "font-semibold text-ink", "Suggested answer" }
-                            p { class: "text-sm text-body", "Generated from project context and the latest detected question." }
+                    div { class: "mt-5 border-l-4 border-hairline px-5 py-1 font-mono text-sm leading-relaxed text-on-dark-soft",
+                        p { class: "mb-4 text-sm font-semibold text-on-dark-soft",
+                            span { class: "italic", "Thinking:" }
+                            " Suggested answer"
                         }
-                        div { class: "whitespace-pre-wrap text-sm leading-relaxed text-body", "{answer}" }
+                        div { class: "whitespace-pre-wrap text-base leading-7", "{answer}" }
                     }
                 }
 

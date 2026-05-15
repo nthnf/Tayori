@@ -33,3 +33,10 @@ pub async fn get_project(storage: &Storage, project_id: &str) -> Result<Option<p
         .one(&storage.sqlite)
         .await?)
 }
+
+pub async fn delete_project(storage: &Storage, project_id: &str) -> Result<()> {
+    projects::Entity::delete_by_id(project_id)
+        .exec(&storage.sqlite)
+        .await?;
+    Ok(())
+}

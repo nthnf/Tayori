@@ -130,6 +130,20 @@ impl Storage {
         Ok(())
     }
 
+    /// Delete all LanceDB document chunks for one project.
+    pub async fn delete_lance_document_chunks_for_project(&self, project_id: &str) -> Result<()> {
+        let table = self
+            .lancedb
+            .open_table(DOCUMENT_CHUNKS_TABLE)
+            .execute()
+            .await?;
+        table
+            .delete(&format!("project_id = '{}'", escape_sql_string(project_id)))
+            .await?;
+
+        Ok(())
+    }
+
     /// Search document chunks by vector similarity inside a project.
     pub async fn search_lance_document_chunks_by_vector(
         &self,

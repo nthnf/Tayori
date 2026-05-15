@@ -28,6 +28,14 @@ impl Storage {
         Ok(())
     }
 
+    pub async fn rebuild_lance_schema(&self) -> Result<()> {
+        self.lancedb.drop_table(DOCUMENT_CHUNKS_TABLE, &[]).await?;
+        self.lancedb
+            .drop_table(TRANSCRIPT_SUMMARIES_TABLE, &[])
+            .await?;
+        self.ensure_lance_schema().await
+    }
+
     async fn ensure_lance_tables(&self) -> Result<()> {
         let embedding_dimension = self.embedding_dimension().await?;
         let docs_schema = document_chunk_schema(embedding_dimension);

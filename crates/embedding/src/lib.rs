@@ -5,6 +5,45 @@ use fastembed::{
     TextRerank,
 };
 
+pub const DENSE_MODEL_OPTIONS: &[&str] = &[
+    "jinaai/jina-embeddings-v2-base-code",
+    "jinaai/jina-embeddings-v2-base-en",
+    "baai/bge-small-en-v1.5",
+    "baai/bge-base-en-v1.5",
+    "baai/bge-large-en-v1.5",
+    "baai/bge-m3",
+    "sentence-transformers/all-minilm-l6-v2",
+    "sentence-transformers/all-minilm-l12-v2",
+    "sentence-transformers/all-mpnet-base-v2",
+    "sentence-transformers/paraphrase-multilingual-minilm-l12-v2",
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+    "nomic-ai/nomic-embed-text-v1",
+    "nomic-ai/nomic-embed-text-v1.5",
+    "intfloat/multilingual-e5-small",
+    "intfloat/multilingual-e5-base",
+    "intfloat/multilingual-e5-large",
+    "mixedbread-ai/mxbai-embed-large-v1",
+    "alibaba-nlp/gte-base-en-v1.5",
+    "alibaba-nlp/gte-large-en-v1.5",
+    "lightonai/modernbert-embed-large",
+    "qdrant/clip-vit-b-32-text",
+    "google/embeddinggemma-300m",
+    "snowflake/snowflake-arctic-embed-xs",
+    "snowflake/snowflake-arctic-embed-s",
+    "snowflake/snowflake-arctic-embed-m",
+    "snowflake/snowflake-arctic-embed-m-long",
+    "snowflake/snowflake-arctic-embed-l",
+];
+
+pub const SPARSE_MODEL_OPTIONS: &[&str] = &["prithivida/splade_pp_en_v1", "baai/bge-m3"];
+
+pub const RERANKER_MODEL_OPTIONS: &[&str] = &[
+    "jinaai/jina-reranker-v1-turbo-en",
+    "jinaai/jina-reranker-v2-base-multilingual",
+    "baai/bge-reranker-base",
+    "baai/bge-reranker-v2-m3",
+];
+
 /// Sparse vector in the shape storage expects for LanceDB rows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SparseVector {
@@ -73,6 +112,22 @@ impl Embedder {
 
     pub fn dense_dim(&self) -> usize {
         self.dense_dim
+    }
+
+    pub fn dense_model_dimension(dense_model_name: &str) -> Result<usize> {
+        let dense_model = Self::dense_str_to_model(dense_model_name)?;
+        Ok(TextEmbedding::get_model_info(&dense_model)?.dim)
+    }
+
+    pub fn validate_models(
+        dense_model_name: &str,
+        sparse_model_name: &str,
+        reranker_model_name: &str,
+    ) -> Result<()> {
+        Self::dense_str_to_model(dense_model_name)?;
+        Self::sparse_str_to_model(sparse_model_name)?;
+        Self::reranker_str_to_model(reranker_model_name)?;
+        Ok(())
     }
 
     pub fn dense_embed(&mut self, texts: Vec<String>) -> Result<Vec<Embedding>> {

@@ -32,8 +32,9 @@ pub fn App() -> Element {
     let mut show_missing_api_key = use_signal(|| false);
     let mut settings_form = use_signal(default_settings_form_view);
     let mut saved_settings_form = use_signal(default_settings_form_view);
-    let mut whisper_model = use_signal(|| None::<WhisperModelView>);
+    let mut whisper_models = use_signal(Vec::<WhisperModelView>::new);
     let mut app_error = use_signal(|| None::<String>);
+    let mut busy_status = use_signal(|| None::<String>);
 
     use_effect(move || {
         if let Some(Ok(core)) = core.read().as_ref() {
@@ -181,6 +182,26 @@ pub fn App() -> Element {
                                                 }
                                             });
                                         }
+                                    },
+                                    on_delete: move |project_id: String| {
+                                        if let Some(Ok(core)) = core.read().as_ref() {
+                                            let core = core.clone();
+                                            spawn(async move {
+                                                match core.delete_project(&project_id).await {
+                                                    Ok(()) => {
+                                                        projects.write().retain(|project| project.id != project_id);
+                                                        if selected_project() == Some(project_id.clone()) {
+                                                            selected_project.set(None);
+                                                            selected_session.set(None);
+                                                            documents.set(Vec::new());
+                                                            sessions.set(Vec::new());
+                                                            page.set(Page::Dashboard);
+                                                        }
+                                                    }
+                                                    Err(error) => app_error.set(Some(error.to_string())),
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                             },
@@ -195,19 +216,59 @@ pub fn App() -> Element {
                                             .add_filter("Text documents", &["txt", "md", "markdown", "csv", "json"])
                                             .pick_file() else { return; };
 
+                                         if let Some(Ok(core)) = core.read().as_ref() {
+                                             let core = core.clone();
+                                             busy_status.set(Some("Uploading document and preparing search data. You can keep using Tayori, but do not close the app until this finishes.".to_string()));
+                                             spawn(async move {
+                                                let result = tokio::task::spawn_blocking(move || {
+                                                    let rt = tokio::runtime::Builder::new_current_thread()
+                                                        .enable_all()
+                                                        .build()
+                                                        .map_err(|error| error.to_string())?;
+                                                    rt.block_on(core.upload_document_from_settings(project_id, path))
+                                                        .map_err(|error| error.to_string())
+                                                })
+                                                .await;
+
+                                                 match result {
+                                                     Ok(Ok(document)) => documents.write().insert(0, document_card_from_view(document)),
+                                                     Ok(Err(error)) => app_error.set(Some(error)),
+                                                     Err(error) => app_error.set(Some(error.to_string())),
+                                                 }
+                                                 busy_status.set(None);
+                                             });
+                                         }
+                                    },
+                                    on_open_session: move |session_id: String| {
+                                        selected_session.set(Some(session_id));
+                                        page.set(Page::LiveRecording);
+                                    },
+                                    on_delete_document: move |document_id: String| {
+                                        let Some(project_id) = selected_project() else { return; };
                                         if let Some(Ok(core)) = core.read().as_ref() {
                                             let core = core.clone();
                                             spawn(async move {
-                                                match core.upload_document_from_settings(project_id, path).await {
-                                                    Ok(document) => documents.write().insert(0, document_card_from_view(document)),
+                                                match core.delete_document(&project_id, &document_id).await {
+                                                    Ok(()) => documents.write().retain(|document| document.id != document_id),
                                                     Err(error) => app_error.set(Some(error.to_string())),
                                                 }
                                             });
                                         }
                                     },
-                                    on_open_session: move |session_id: String| {
-                                        selected_session.set(Some(session_id));
-                                        page.set(Page::LiveRecording);
+                                    on_delete_session: move |session_id: String| {
+                                        let Some(project_id) = selected_project() else { return; };
+                                        if selected_session() == Some(session_id.clone()) {
+                                            selected_session.set(None);
+                                        }
+                                        if let Some(Ok(core)) = core.read().as_ref() {
+                                            let core = core.clone();
+                                            spawn(async move {
+                                                match core.delete_session(&project_id, &session_id).await {
+                                                    Ok(()) => sessions.write().retain(|session| session.id != session_id),
+                                                    Err(error) => app_error.set(Some(error.to_string())),
+                                                }
+                                            });
+                                        }
                                     },
                                     on_create_session: move |_| {
                                         if saved_settings_form.read().llm_api_key_preview.is_empty() {
@@ -326,50 +387,65 @@ pub fn App() -> Element {
                                     theme,
                                     settings: settings_form,
                                     saved_settings: saved_settings_form,
-                                    whisper_model,
-                                    on_check_whisper_model: move |model_name: String| {
+                                    whisper_models,
+                                    on_check_whisper_models: move |_| {
                                         if let Some(Ok(core)) = core.read().as_ref() {
-                                            match core.whisper_model_status(&model_name) {
-                                                Ok(status) => whisper_model.set(Some(status)),
+                                            match core.whisper_models() {
+                                                Ok(models) => whisper_models.set(models),
                                                 Err(error) => app_error.set(Some(error.to_string())),
                                             }
                                         }
                                     },
-                                    on_install_whisper_model: move |model_name: String| {
-                                        if let Some(Ok(core)) = core.read().as_ref() {
-                                            let core = core.clone();
-                                            spawn(async move {
+                                     on_install_whisper_model: move |model_name: String| {
+                                         if let Some(Ok(core)) = core.read().as_ref() {
+                                             let core = core.clone();
+                                             busy_status.set(Some("Downloading Whisper speech model. You can keep using Tayori, but do not close the app until this finishes.".to_string()));
+                                             spawn(async move {
                                                 match tokio::task::spawn_blocking(move || core.install_whisper_model_by_name(&model_name)).await {
-                                                    Ok(Ok(status)) => whisper_model.set(Some(status)),
+                                                    Ok(Ok(status)) => whisper_models.with_mut(|models| update_whisper_model_status(models, status)),
                                                     Ok(Err(error)) => app_error.set(Some(error.to_string())),
                                                     Err(error) => app_error.set(Some(error.to_string())),
                                                 }
+                                                busy_status.set(None);
                                             });
                                         }
                                     },
                                     on_remove_whisper_model: move |model_name: String| {
                                         if let Some(Ok(core)) = core.read().as_ref() {
                                             match core.remove_whisper_model_by_name(&model_name) {
-                                                Ok(status) => whisper_model.set(Some(status)),
+                                                Ok(status) => whisper_models.with_mut(|models| update_whisper_model_status(models, status)),
                                                 Err(error) => app_error.set(Some(error.to_string())),
                                             }
                                         }
                                     },
-                                    on_save: move |form: SettingsFormView| {
-                                        if let Some(Ok(core)) = core.read().as_ref() {
-                                            let core = core.clone();
-                                            spawn(async move {
-                                                match core.update_settings_form(form).await {
-                                                    Ok(form) => {
-                                                        theme.set(theme_from_settings(&form.ui_theme));
-                                                        settings_form.set(form.clone());
-                                                        saved_settings_form.set(form);
+                                     on_save: move |form: SettingsFormView| {
+                                         if let Some(Ok(core)) = core.read().as_ref() {
+                                             let core = core.clone();
+                                             busy_status.set(Some("Preparing selected AI models and saved content. You can keep using Tayori, but do not close the app until this finishes.".to_string()));
+                                             spawn(async move {
+                                                let result = tokio::task::spawn_blocking(move || {
+                                                    let rt = tokio::runtime::Builder::new_current_thread()
+                                                        .enable_all()
+                                                        .build()
+                                                        .map_err(|error| error.to_string())?;
+                                                    rt.block_on(core.update_settings_form(form))
+                                                        .map_err(|error| error.to_string())
+                                                })
+                                                .await;
+
+                                                 match result {
+                                                     Ok(Ok(form)) => {
+                                                         theme.set(theme_from_settings(&form.ui_theme));
+                                                         settings_form.set(form.clone());
+                                                         saved_settings_form.set(form);
                                                     }
-                                                    Err(error) => app_error.set(Some(error.to_string())),
-                                                }
-                                            });
-                                        }
-                                    }
+                                                     Ok(Err(error)) => app_error.set(Some(error)),
+                                                     Err(error) => app_error.set(Some(error.to_string())),
+                                                 }
+                                                 busy_status.set(None);
+                                             });
+                                         }
+                                     }
                                 }
                             },
                         }
@@ -385,6 +461,17 @@ pub fn App() -> Element {
                                     button { class: "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active", onclick: move |_| { show_missing_api_key.set(false); page.set(Page::Settings); }, "Add API key" }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            if let Some(status) = busy_status() {
+                div { class: "pointer-events-none fixed inset-x-0 bottom-0 z-30 px-4 pb-4",
+                    div { class: "mx-auto flex max-w-4xl items-center gap-3 rounded-lg border border-hairline bg-canvas/95 px-4 py-3 text-sm text-body shadow-2xl backdrop-blur",
+                        div { class: "h-2.5 w-2.5 animate-pulse rounded-full bg-primary" }
+                        div {
+                            p { class: "font-semibold text-ink", "Background work in progress" }
+                            p { "{status}" }
                         }
                     }
                 }
@@ -431,6 +518,17 @@ fn transcript_card_from_view(chunk: TranscriptChunkView) -> TranscriptCard {
         duration_ms: chunk.duration_ms,
         has_question: chunk.has_question,
         confidence: chunk.confidence,
+    }
+}
+
+fn update_whisper_model_status(models: &mut Vec<WhisperModelView>, status: WhisperModelView) {
+    if let Some(model) = models
+        .iter_mut()
+        .find(|model| model.model_name == status.model_name)
+    {
+        *model = status;
+    } else {
+        models.push(status);
     }
 }
 

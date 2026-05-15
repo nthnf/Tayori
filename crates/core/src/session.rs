@@ -48,3 +48,10 @@ pub async fn end_session(storage: &Storage, session_id: &str) -> Result<()> {
     active.update(&storage.sqlite).await?;
     Ok(())
 }
+
+pub async fn delete_session(storage: &Storage, session_id: &str) -> Result<()> {
+    sessions::Entity::delete_by_id(session_id)
+        .exec(&storage.sqlite)
+        .await?;
+    Ok(())
+}

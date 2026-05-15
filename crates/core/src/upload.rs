@@ -64,6 +64,13 @@ pub async fn list_documents(storage: &Storage, project_id: &str) -> Result<Vec<d
         .await?)
 }
 
+pub async fn delete_document(storage: &Storage, document_id: &str) -> Result<()> {
+    documents::Entity::delete_by_id(document_id)
+        .exec(&storage.sqlite)
+        .await?;
+    Ok(())
+}
+
 /// Ingest a local document with explicit chunking options.
 pub async fn upload_document_with_options(
     storage: &Storage,
@@ -148,6 +155,53 @@ pub async fn upload_document_with_options(
             Err(error)
         }
     }
+}
+
+/// Rebuild LanceDB chunks for an existing SQLite document row.
+pub async fn reindex_document(
+    storage: &Storage,
+    embedder: &mut Embedder,
+    document: &documents::Model,
+) -> Result<usize> {
+    let path = validate_document_reindex_source(document)?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read document: {path:?}"))?;
+
+    ingest_document_chunks(
+        storage,
+        embedder,
+        &document.id,
+        &document.project_id,
+        &bytes,
+        UploadDocumentOptions::default(),
+    )
+    .await
+}
+
+pub fn validate_document_reindex_source(document: &documents::Model) -> Result<&Path> {
+    ensure!(
+        document.status == "ready",
+        "cannot reindex document with status: {}",
+        document.status
+    );
+    let path = document
+        .original_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("document has no original path: {}", document.id))?;
+    let path = Path::new(path);
+    ensure!(path.is_file(), "document path is not a file: {path:?}");
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to read document metadata: {path:?}"))?;
+    ensure!(
+        metadata.len() <= MAX_DOCUMENT_BYTES,
+        "document is too large: {} bytes exceeds {} bytes",
+        metadata.len(),
+        MAX_DOCUMENT_BYTES
+    );
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read document: {path:?}"))?;
+    String::from_utf8(bytes).context("document is not valid UTF-8")?;
+    Ok(path)
 }
 
 async fn ingest_document_chunks(

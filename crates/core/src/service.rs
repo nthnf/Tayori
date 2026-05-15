@@ -2,12 +2,15 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use embedding::Embedder;
 use futures_util::StreamExt;
-use keyring::{Entry, Error as KeyringError};
+use keyring::Entry;
+#[cfg(not(test))]
+use keyring::Error as KeyringError;
 use llm::{ChatStream, LlmClient};
 use migration::{Migrator, MigratorTrait};
+use reqwest::{StatusCode, blocking::Client, header::RANGE};
 use sea_orm::{ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter, QueryOrder, Set};
+use sha1::{Digest, Sha1};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use storage::{
     entities::{documents, projects, sessions, settings, transcript_chunks, transcript_summaries},
@@ -16,6 +19,8 @@ use storage::{
     storage::Storage,
 };
 use stt::chunk::TranscriptionChunk;
+
+pub use embedding::{DENSE_MODEL_OPTIONS, RERANKER_MODEL_OPTIONS, SPARSE_MODEL_OPTIONS};
 
 use crate::{
     AudioRuntime, project,
@@ -256,6 +261,20 @@ impl TayoriCore {
     /// future migrations can tell that the key belongs in keyring.
     pub async fn update_settings(&self, update: SettingsUpdate) -> Result<SettingsView> {
         let mut model = settings_service::get_settings(&self.storage).await?;
+        let search_models_changed = model.embedding_model != update.embedding_model
+            || model.sparse_model != update.sparse_model;
+        let reranker_model_changed = model.reranker_model != update.reranker_model;
+        let documents_to_rebuild = if search_models_changed {
+            self.documents_to_rebuild().await?
+        } else {
+            Vec::new()
+        };
+        Embedder::validate_models(
+            &update.embedding_model,
+            &update.sparse_model,
+            &update.reranker_model,
+        )?;
+        let embedding_dimension = Embedder::dense_model_dimension(&update.embedding_model)?;
         let previous_whisper_model = model
             .whisper_model
             .clone()
@@ -268,6 +287,7 @@ impl TayoriCore {
         model.llm_store_responses = 1;
         model.embedding_model = update.embedding_model;
         model.sparse_model = update.sparse_model;
+        model.embedding_dimension = embedding_dimension as i64;
         model.reranker_model = update.reranker_model;
         model.whisper_model = Some(next_whisper_model.clone());
         model.summary_minutes = update.summary_minutes.clamp(1, 10);
@@ -287,9 +307,21 @@ impl TayoriCore {
             model.llm_api_key_ref = Some(LLM_API_KEY_REF.to_string());
         }
 
-        settings_service::update_settings(&self.storage, model)
-            .await
-            .map(settings_view)
+        let mut prepared_embedder = if search_models_changed || reranker_model_changed {
+            Some(embedder_from_settings(&model)?)
+        } else {
+            None
+        };
+
+        let model = settings_service::update_settings(&self.storage, model).await?;
+        if search_models_changed {
+            let embedder = prepared_embedder
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("embedding models were not prepared"))?;
+            self.rebuild_search_data(embedder, documents_to_rebuild)
+                .await?;
+        }
+        Ok(settings_view(model))
     }
 
     /// Save settings from an editable form model and return the refreshed form.
@@ -303,6 +335,14 @@ impl TayoriCore {
     pub fn whisper_model_status(&self, model_name: &str) -> Result<WhisperModelView> {
         validate_whisper_model_name_or_blank(model_name)?;
         whisper_model_view(model_name)
+    }
+
+    /// List all supported Whisper models with local install state.
+    pub fn whisper_models(&self) -> Result<Vec<WhisperModelView>> {
+        WHISPER_MODELS
+            .iter()
+            .map(|model| whisper_model_view(model.name))
+            .collect()
     }
 
     /// Install a named Whisper model through the Rust-owned script wrapper.
@@ -346,6 +386,17 @@ impl TayoriCore {
             .collect())
     }
 
+    /// Delete a project and its rebuildable search projection.
+    pub async fn delete_project(&self, project_id: &str) -> Result<()> {
+        self.storage
+            .delete_lance_document_chunks_for_project(project_id)
+            .await?;
+        self.storage
+            .delete_lance_transcript_summaries_for_project(project_id)
+            .await?;
+        project::delete_project(&self.storage, project_id).await
+    }
+
     /// Create a running session for a project.
     ///
     /// A session stays `running` until `end_session` is called. UI Start/Pause
@@ -377,6 +428,14 @@ impl TayoriCore {
         session::end_session(&self.storage, session_id).await
     }
 
+    /// Delete one session and its rebuildable transcript summary projection.
+    pub async fn delete_session(&self, project_id: &str, session_id: &str) -> Result<()> {
+        self.storage
+            .delete_lance_transcript_summaries_for_session(project_id, session_id)
+            .await?;
+        session::delete_session(&self.storage, session_id).await
+    }
+
     /// List SQLite document metadata for a project.
     pub async fn list_documents(&self, project_id: &str) -> Result<Vec<DocumentView>> {
         Ok(upload::list_documents(&self.storage, project_id)
@@ -384,6 +443,14 @@ impl TayoriCore {
             .into_iter()
             .map(document_view)
             .collect())
+    }
+
+    /// Delete one uploaded document and its rebuildable search chunks.
+    pub async fn delete_document(&self, project_id: &str, document_id: &str) -> Result<()> {
+        self.storage
+            .delete_lance_document_chunks_for_document(project_id, document_id)
+            .await?;
+        upload::delete_document(&self.storage, document_id).await
     }
 
     /// Upload using an already constructed embedder.
@@ -537,6 +604,7 @@ impl TayoriCore {
                 }
             };
             let mut summarizer = TranscriptSummaryAccumulator::new(settings.summary_minutes);
+            let mut question_detector = RollingQuestionDetector::new();
 
             while let Ok(chunk) = transcriptions.recv() {
                 let should_continue = rt.block_on(core.process_live_chunk(
@@ -545,6 +613,7 @@ impl TayoriCore {
                     chunk,
                     &event_tx,
                     &mut summarizer,
+                    &mut question_detector,
                 ));
 
                 if !should_continue {
@@ -597,6 +666,7 @@ impl TayoriCore {
         chunk: TranscriptionChunk,
         event_tx: &Sender<LiveSessionEvent>,
         summarizer: &mut TranscriptSummaryAccumulator,
+        question_detector: &mut RollingQuestionDetector,
     ) -> bool {
         let chunk = match self
             .persist_transcription_chunk(project_id, session_id, chunk)
@@ -618,10 +688,11 @@ impl TayoriCore {
         }
 
         let should_summarize = summarizer.push(chunk.clone());
+        let detected_question = question_detector.push(chunk.clone());
 
-        if chunk.has_question
+        if let Some(question) = detected_question
             && !self
-                .answer_detected_question(project_id, session_id, &chunk, event_tx)
+                .answer_detected_question(project_id, session_id, question, event_tx)
                 .await
         {
             return false;
@@ -639,13 +710,13 @@ impl TayoriCore {
         &self,
         project_id: &str,
         session_id: &str,
-        chunk: &TranscriptChunkView,
+        question: DetectedQuestionWindow,
         event_tx: &Sender<LiveSessionEvent>,
     ) -> bool {
         if event_tx
             .send(LiveSessionEvent::QuestionDetected {
-                question: chunk.text.clone(),
-                confidence: chunk.confidence,
+                question: question.text.clone(),
+                confidence: question.confidence,
             })
             .is_err()
         {
@@ -657,7 +728,7 @@ impl TayoriCore {
         }
 
         let answer_stream = match self
-            .stream_answer_from_settings(project_id, &chunk.text)
+            .stream_answer_from_settings(project_id, &question.text)
             .await
         {
             Ok(answer_stream) => answer_stream,
@@ -668,7 +739,7 @@ impl TayoriCore {
             }
         };
 
-        let question = chunk.text.clone();
+        let question = question.text;
         let context = answer_stream.context;
         let mut stream = answer_stream.stream;
         let mut answer = String::new();
@@ -797,6 +868,68 @@ impl TayoriCore {
                 created_at_unix_secs: now.timestamp(),
             })
             .await?;
+
+        Ok(())
+    }
+
+    async fn rebuild_search_data(
+        &self,
+        embedder: &mut Embedder,
+        documents: Vec<documents::Model>,
+    ) -> Result<()> {
+        self.storage.rebuild_lance_schema().await?;
+
+        for document in documents {
+            upload::reindex_document(&self.storage, embedder, &document).await?;
+        }
+
+        self.rebuild_transcript_summary_search_data(embedder).await
+    }
+
+    async fn documents_to_rebuild(&self) -> Result<Vec<documents::Model>> {
+        let documents = documents::Entity::find()
+            .filter(documents::Column::Status.eq("ready"))
+            .order_by_asc(documents::Column::CreatedAt)
+            .all(&self.storage.sqlite)
+            .await?;
+
+        for document in &documents {
+            upload::validate_document_reindex_source(document)?;
+        }
+
+        Ok(documents)
+    }
+
+    async fn rebuild_transcript_summary_search_data(&self, embedder: &mut Embedder) -> Result<()> {
+        let summaries = transcript_summaries::Entity::find()
+            .order_by_asc(transcript_summaries::Column::CreatedAt)
+            .all(&self.storage.sqlite)
+            .await?;
+        for summary in summaries {
+            let mut dense = embedder.dense_embed(vec![summary.summary.clone()])?;
+            let mut sparse = embedder.sparse_embed_vectors(vec![summary.summary.clone()])?;
+            let dense_vector = dense.pop().unwrap_or_default();
+            let sparse_vector = sparse.pop().unwrap_or_default();
+
+            self.storage
+                .add_lance_transcript_summary(LanceTranscriptSummary {
+                    id: summary.id,
+                    project_id: summary.project_id,
+                    session_id: summary.session_id,
+                    summary_index: summary.summary_index,
+                    chunk_start_index: summary.chunk_start_index,
+                    chunk_end_index: summary.chunk_end_index,
+                    start_ms: summary.start_ms,
+                    end_ms: summary.end_ms,
+                    duration_ms: summary.duration_ms,
+                    summary: summary.summary,
+                    dense_vector,
+                    sparse_indices: sparse_vector.indices,
+                    sparse_values: sparse_vector.values,
+                    created_at_unix_secs: summary.created_at.timestamp(),
+                })
+                .await?;
+        }
 
         Ok(())
     }
@@ -992,14 +1125,21 @@ fn settings_view(settings: settings::Model) -> SettingsView {
     }
 }
 
+#[cfg(not(test))]
 const LLM_API_KEY_SERVICE: &str = "tayori";
+#[cfg(not(test))]
 const LLM_API_KEY_ACCOUNT: &str = "llm-api-key";
 const LLM_API_KEY_REF: &str = "os-keyring:tayori:llm-api-key";
 
+#[cfg(not(test))]
 fn llm_api_key_entry() -> Result<Entry> {
     Ok(Entry::new(LLM_API_KEY_SERVICE, LLM_API_KEY_ACCOUNT)?)
 }
 
+#[cfg(test)]
+static TEST_LLM_API_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(not(test))]
 fn llm_api_key() -> Result<String> {
     let key = llm_api_key_entry()?.get_password()?;
     if key.trim().is_empty() {
@@ -1008,17 +1148,48 @@ fn llm_api_key() -> Result<String> {
     Ok(key)
 }
 
+#[cfg(test)]
+fn llm_api_key() -> Result<String> {
+    let key = TEST_LLM_API_KEY
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test keyring lock poisoned"))?
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("LLM API key is not configured"))?;
+    if key.trim().is_empty() {
+        anyhow::bail!("LLM API key is not configured");
+    }
+    Ok(key)
+}
+
+#[cfg(not(test))]
 fn replace_llm_api_key(api_key: &str) -> Result<()> {
     let entry = llm_api_key_entry()?;
     entry.set_password(api_key)?;
     Ok(())
 }
 
+#[cfg(test)]
+fn replace_llm_api_key(api_key: &str) -> Result<()> {
+    *TEST_LLM_API_KEY
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test keyring lock poisoned"))? = Some(api_key.to_string());
+    Ok(())
+}
+
+#[cfg(not(test))]
 fn delete_llm_api_key() -> Result<()> {
     match llm_api_key_entry()?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+#[cfg(test)]
+fn delete_llm_api_key() -> Result<()> {
+    *TEST_LLM_API_KEY
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test keyring lock poisoned"))? = None;
+    Ok(())
 }
 
 fn mask_api_key(api_key: &str) -> String {
@@ -1032,30 +1203,222 @@ fn mask_api_key(api_key: &str) -> String {
     format!("{start}******...{end}")
 }
 
-/// Run the repository model installer for a named Whisper model.
-///
-/// The shell script owns the model catalog, download URL, resume behavior, and
-/// checksum verification. Core owns when it is invoked: settings updates call
-/// this only when the saved model name changes. Keeping the wrapper here avoids
-/// Dioxus spawning shell commands directly.
-fn install_whisper_model(model_name: &str) -> Result<PathBuf> {
-    let output = Command::new("bash")
-        .arg(model_install_script())
-        .arg("download")
-        .arg("--model")
-        .arg(model_name)
-        .arg("--quiet")
-        .output()?;
+const WHISPER_MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const WHISPER_MODELS: &[WhisperModelDownload] = &[
+    WhisperModelDownload {
+        name: "tiny",
+        sha1: "bd577a113a864445d4c299885e0cb97d4ba92b5f",
+    },
+    WhisperModelDownload {
+        name: "tiny-q5_1",
+        sha1: "2827a03e495b1ed3048ef28a6a4620537db4ee51",
+    },
+    WhisperModelDownload {
+        name: "tiny-q8_0",
+        sha1: "19e8118f6652a650569f5a949d962154e01571d9",
+    },
+    WhisperModelDownload {
+        name: "tiny.en",
+        sha1: "c78c86eb1a8faa21b369bcd33207cc90d64ae9df",
+    },
+    WhisperModelDownload {
+        name: "tiny.en-q5_1",
+        sha1: "3fb92ec865cbbc769f08137f22470d6b66e071b6",
+    },
+    WhisperModelDownload {
+        name: "tiny.en-q8_0",
+        sha1: "802d6668e7d411123e672abe4cb6c18f12306abb",
+    },
+    WhisperModelDownload {
+        name: "base",
+        sha1: "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+    },
+    WhisperModelDownload {
+        name: "base-q5_1",
+        sha1: "a3733eda680ef76256db5fc5dd9de8629e62c5e7",
+    },
+    WhisperModelDownload {
+        name: "base-q8_0",
+        sha1: "7bb89bb49ed6955013b166f1b6a6c04584a20fbe",
+    },
+    WhisperModelDownload {
+        name: "base.en",
+        sha1: "137c40403d78fd54d454da0f9bd998f78703390c",
+    },
+    WhisperModelDownload {
+        name: "base.en-q5_1",
+        sha1: "d26d7ce5a1b6e57bea5d0431b9c20ae49423c94a",
+    },
+    WhisperModelDownload {
+        name: "base.en-q8_0",
+        sha1: "bb1574182e9b924452bf0cd1510ac034d323e948",
+    },
+    WhisperModelDownload {
+        name: "small",
+        sha1: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
+    },
+    WhisperModelDownload {
+        name: "small-q5_1",
+        sha1: "6fe57ddcfdd1c6b07cdcc73aaf620810ce5fc771",
+    },
+    WhisperModelDownload {
+        name: "small-q8_0",
+        sha1: "bcad8a2083f4e53d648d586b7dbc0cd673d8afad",
+    },
+    WhisperModelDownload {
+        name: "small.en",
+        sha1: "db8a495a91d927739e50b3fc1cc4c6b8f6c2d022",
+    },
+    WhisperModelDownload {
+        name: "small.en-q5_1",
+        sha1: "20f54878d608f94e4a8ee3ae56016571d47cba34",
+    },
+    WhisperModelDownload {
+        name: "small.en-q8_0",
+        sha1: "9d75ff4ccfa0a8217870d7405cf8cef0a5579852",
+    },
+    WhisperModelDownload {
+        name: "small.en-tdrz",
+        sha1: "b6c6e7e89af1a35c08e6de56b66ca6a02a2fdfa1",
+    },
+    WhisperModelDownload {
+        name: "medium",
+        sha1: "fd9727b6e1217c2f614f9b698455c4ffd82463b4",
+    },
+    WhisperModelDownload {
+        name: "medium-q5_0",
+        sha1: "7718d4c1ec62ca96998f058114db98236937490e",
+    },
+    WhisperModelDownload {
+        name: "medium-q8_0",
+        sha1: "e66645948aff4bebbec71b3485c576f3d63af5d6",
+    },
+    WhisperModelDownload {
+        name: "medium.en",
+        sha1: "8c30f0e44ce9560643ebd10bbe50cd20eafd3723",
+    },
+    WhisperModelDownload {
+        name: "medium.en-q5_0",
+        sha1: "bb3b5281bddd61605d6fc76bc5b92d8f20284c3b",
+    },
+    WhisperModelDownload {
+        name: "medium.en-q8_0",
+        sha1: "b1cf48c12c807e14881f634fb7b6c6ca867f6b38",
+    },
+    WhisperModelDownload {
+        name: "large-v1",
+        sha1: "b1caaf735c4cc1429223d5a74f0f4d0b9b59a299",
+    },
+    WhisperModelDownload {
+        name: "large-v2",
+        sha1: "0f4c8e34f21cf1a914c59d8b3ce882345ad349d6",
+    },
+    WhisperModelDownload {
+        name: "large-v2-q5_0",
+        sha1: "00e39f2196344e901b3a2bd5814807a769bd1630",
+    },
+    WhisperModelDownload {
+        name: "large-v2-q8_0",
+        sha1: "da97d6ca8f8ffbeeb5fd147f79010eeea194ba38",
+    },
+    WhisperModelDownload {
+        name: "large-v3",
+        sha1: "ad82bf6a9043ceed055076d0fd39f5f186ff8062",
+    },
+    WhisperModelDownload {
+        name: "large-v3-q5_0",
+        sha1: "e6e2ed78495d403bef4b7cff42ef4aaadcfea8de",
+    },
+    WhisperModelDownload {
+        name: "large-v3-turbo",
+        sha1: "4af2b29d7ec73d781377bfd1758ca957a807e941",
+    },
+    WhisperModelDownload {
+        name: "large-v3-turbo-q5_0",
+        sha1: "e050f7970618a659205450ad97eb95a18d69c9ee",
+    },
+    WhisperModelDownload {
+        name: "large-v3-turbo-q8_0",
+        sha1: "01bf15bedffe9f39d65c1b6ff9b687ea91f59e0e",
+    },
+];
 
-    if !output.status.success() {
+struct WhisperModelDownload {
+    name: &'static str,
+    sha1: &'static str,
+}
+
+fn install_whisper_model(model_name: &str) -> Result<PathBuf> {
+    let model = whisper_model_download(model_name)?;
+    let path = stt::path::model_path(model.name);
+    stt::path::ensure_path_exists(&path)?;
+
+    if path.is_file() {
+        if sha1_hex(&path)? == model.sha1 {
+            return Ok(path);
+        }
+        std::fs::remove_file(&path)?;
+    }
+
+    let part_path = path.with_extension("bin.part");
+    download_whisper_model_part(model.name, &part_path)?;
+
+    let actual_sha1 = sha1_hex(&part_path)?;
+    if actual_sha1 != model.sha1 {
+        let _ = std::fs::remove_file(&part_path);
         anyhow::bail!(
-            "failed to install Whisper model {model_name}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "Whisper model checksum mismatch for {model_name}; expected {}, got {}. Retry the download.",
+            model.sha1,
+            actual_sha1
         );
     }
 
-    let path = String::from_utf8(output.stdout)?;
-    Ok(PathBuf::from(path.trim()))
+    std::fs::rename(&part_path, &path)?;
+    Ok(path)
+}
+
+fn download_whisper_model_part(model_name: &str, part_path: &std::path::Path) -> Result<()> {
+    let filename = format!("ggml-{model_name}.bin");
+    let url = format!("{WHISPER_MODEL_BASE_URL}/{filename}");
+    let existing_len = part_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let client = Client::new();
+    let mut request = client.get(url);
+    if existing_len > 0 {
+        request = request.header(RANGE, format!("bytes={existing_len}-"));
+    }
+
+    let mut response = request.send()?;
+    let status = response.status();
+    let append = existing_len > 0 && status == StatusCode::PARTIAL_CONTENT;
+    if !(status.is_success() || status == StatusCode::PARTIAL_CONTENT) {
+        anyhow::bail!("failed to download Whisper model {model_name}: HTTP {status}");
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(part_path)?;
+    std::io::copy(&mut response, &mut file)?;
+    Ok(())
+}
+
+fn whisper_model_download(model_name: &str) -> Result<&'static WhisperModelDownload> {
+    WHISPER_MODELS
+        .iter()
+        .find(|model| model.name == model_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown Whisper model name: {model_name}"))
+}
+
+fn sha1_hex(path: &std::path::Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha1::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn whisper_model_view(model_name: &str) -> Result<WhisperModelView> {
@@ -1085,13 +1448,6 @@ fn validate_whisper_model_name(model_name: &str) -> Result<()> {
         && !model_name.contains("..");
     anyhow::ensure!(valid, "invalid Whisper model name: {model_name}");
     Ok(())
-}
-
-fn model_install_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("scripts")
-        .join("install-model.sh")
 }
 
 fn transcript_chunk_view(
@@ -1181,6 +1537,80 @@ impl TranscriptSummaryAccumulator {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DetectedQuestionWindow {
+    text: String,
+    confidence: u8,
+}
+
+#[derive(Debug, Default)]
+struct RollingQuestionDetector {
+    chunks: Vec<TranscriptChunkView>,
+    pending: Option<DetectedQuestionWindow>,
+    answered_end_index: Option<i64>,
+}
+
+impl RollingQuestionDetector {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, chunk: TranscriptChunkView) -> Option<DetectedQuestionWindow> {
+        self.chunks.push(chunk);
+        if self.chunks.len() > 3 {
+            self.chunks.remove(0);
+        }
+
+        if let Some(pending) = self.pending.take() {
+            self.answered_end_index = self.chunks.last().map(|chunk| chunk.chunk_index);
+            return Some(DetectedQuestionWindow {
+                text: self.question_text(),
+                confidence: pending.confidence,
+            });
+        }
+
+        let latest = self.chunks.last()?;
+        if self
+            .answered_end_index
+            .is_some_and(|index| latest.chunk_index <= index)
+        {
+            return None;
+        }
+
+        let text = self.question_text();
+        let detection = detection::detect_question_or_command(&text);
+        if !detection.has_question {
+            return None;
+        }
+
+        let question = DetectedQuestionWindow {
+            text,
+            confidence: (detection.confidence.clamp(0.0, 1.0) * 100.0).round() as u8,
+        };
+
+        if latest_looks_complete(latest) {
+            self.answered_end_index = Some(latest.chunk_index);
+            Some(question)
+        } else {
+            self.pending = Some(question);
+            None
+        }
+    }
+
+    fn question_text(&self) -> String {
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn latest_looks_complete(chunk: &TranscriptChunkView) -> bool {
+    chunk.text.trim_end().ends_with(['?', '.', '!', ':'])
+}
+
 async fn next_summary_index(storage: &Storage, session_id: &str) -> Result<i64> {
     let latest = transcript_summaries::Entity::find()
         .filter(transcript_summaries::Column::SessionId.eq(session_id))
@@ -1230,6 +1660,20 @@ mod tests {
             .unwrap()
     }
 
+    async fn test_core() -> TayoriCore {
+        let temp = tempfile::tempdir().unwrap().keep();
+        let sqlite_path = temp.join("tayori.db");
+        let sqlite = Database::connect(format!("sqlite://{}?mode=rwc", sqlite_path.display()))
+            .await
+            .unwrap();
+        Migrator::up(&sqlite, None).await.unwrap();
+        let lancedb = lancedb::connect("memory://").execute().await.unwrap();
+
+        TayoriCore {
+            storage: Arc::new(Storage { sqlite, lancedb }),
+        }
+    }
+
     #[test]
     fn optional_string_trims_empty_values() {
         assert_eq!(optional_string("  ".to_string()), None);
@@ -1243,6 +1687,50 @@ mod tests {
     fn api_key_mask_keeps_only_first_and_last_three_chars() {
         assert_eq!(mask_api_key("sk-123456789abc"), "sk-******...abc");
         assert_eq!(mask_api_key("short"), "******");
+    }
+
+    #[test]
+    #[ignore = "uses the host OS keyring"]
+    fn os_keyring_roundtrip_reads_written_secret() {
+        let account = uuid::Uuid::new_v4().to_string();
+        let entry = Entry::new("tayori-test", &account).unwrap();
+
+        entry.set_password("sk-test-key").unwrap();
+        assert_eq!(entry.get_password().unwrap(), "sk-test-key");
+        let _ = entry.delete_credential();
+    }
+
+    #[tokio::test]
+    async fn api_key_save_writes_keyring_and_sqlite_marker() {
+        delete_llm_api_key().unwrap();
+        let core = test_core().await;
+        let mut form = core.settings_form().await.unwrap();
+        form.new_llm_api_key = "sk-test-123456789abc".to_string();
+
+        let saved = core.update_settings_form(form).await.unwrap();
+        let model = settings_service::get_settings(&core.storage).await.unwrap();
+
+        assert_eq!(llm_api_key().unwrap(), "sk-test-123456789abc");
+        assert_eq!(model.llm_api_key_ref.as_deref(), Some(LLM_API_KEY_REF));
+        assert_eq!(saved.llm_api_key_preview, "sk-******...abc");
+    }
+
+    #[tokio::test]
+    async fn settings_reload_reads_sqlite_marker_and_keyring_preview() {
+        delete_llm_api_key().unwrap();
+        replace_llm_api_key("sk-reload-123456abc").unwrap();
+        let core = test_core().await;
+        let mut model = settings_service::get_settings(&core.storage).await.unwrap();
+        model.llm_api_key_ref = Some(LLM_API_KEY_REF.to_string());
+        settings_service::update_settings(&core.storage, model)
+            .await
+            .unwrap();
+
+        let reloaded = core.settings_form().await.unwrap();
+
+        assert_eq!(reloaded.llm_api_key_preview, "sk-******...abc");
+        assert!(reloaded.new_llm_api_key.is_empty());
+        assert!(!reloaded.remove_llm_api_key);
     }
 
     #[test]
@@ -1414,10 +1902,11 @@ mod tests {
     }
 
     #[test]
-    fn model_installer_path_points_to_repository_script() {
-        let path = model_install_script();
+    fn whisper_model_catalog_contains_default_model() {
+        let model = whisper_model_download(stt::path::DEFAULT_WHISPER_MODEL_NAME).unwrap();
 
-        assert!(path.ends_with("scripts/install-model.sh"));
+        assert_eq!(model.name, "small-q8_0");
+        assert_eq!(model.sha1, "bcad8a2083f4e53d648d586b7dbc0cd673d8afad");
     }
 
     #[test]

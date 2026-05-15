@@ -9,6 +9,7 @@ pub fn DashboardPage(
     mut page: Signal<Page>,
     mut selected_project: Signal<Option<String>>,
     on_create: EventHandler<ProjectDraft>,
+    on_delete: EventHandler<String>,
 ) -> Element {
     let mut show_create = use_signal(|| false);
     let can_create = !draft.read().name.trim().is_empty();
@@ -61,29 +62,17 @@ pub fn DashboardPage(
                 }
 
                 section { class: "min-h-0 overflow-auto p-4",
-                    div { class: "mb-3 grid grid-cols-[1fr_180px_120px] gap-3 border-b border-hairline px-3 pb-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted",
+                    div { class: "mb-3 grid grid-cols-[1fr_180px_92px] gap-3 border-b border-hairline px-3 pb-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted",
                         span { "Name" }
-                        span { "Last edited" }
-                        span { "Status" }
+                        span { class: "text-center", "Last edited" }
+                        span { "Actions" }
                     }
                     div { class: "grid gap-1",
                         if project_cards.is_empty() {
                             div { class: "rounded-md border border-dashed border-hairline p-8 text-center text-body", "No projects yet. Create one to begin." }
                         }
                         for project in project_cards {
-                            button {
-                                class: "grid grid-cols-[1fr_180px_120px] gap-3 rounded-md px-3 py-3 text-left hover:bg-surface-soft",
-                                onclick: move |_| {
-                                    selected_project.set(Some(project.id.clone()));
-                                    page.set(Page::Project);
-                                },
-                                div {
-                                    p { class: "font-semibold text-ink", "{project.name}" }
-                                    p { class: "truncate text-sm text-body", if project.description.is_empty() { "No description" } else { "{project.description}" } }
-                                }
-                                span { class: "self-center text-sm text-body", "Today" }
-                                span { class: "self-center rounded-full bg-surface-strong px-3 py-1 text-center text-xs font-semibold text-ink", "Ready" }
-                            }
+                            ProjectRow { project, page, selected_project, on_delete }
                         }
                     }
                 }
@@ -112,6 +101,32 @@ pub fn DashboardPage(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectRow(
+    project: ProjectCard,
+    mut page: Signal<Page>,
+    mut selected_project: Signal<Option<String>>,
+    on_delete: EventHandler<String>,
+) -> Element {
+    let open_project_id = project.id.clone();
+    let delete_project_id = project.id.clone();
+
+    rsx! {
+        div { class: "grid grid-cols-[1fr_180px_92px] gap-3 rounded-md hover:bg-surface-soft",
+            button { class: "col-span-2 grid grid-cols-[1fr_180px] gap-3 px-3 py-3 text-left", onclick: move |_| { selected_project.set(Some(open_project_id.clone())); page.set(Page::Project); },
+                div {
+                    p { class: "font-semibold text-ink", "{project.name}" }
+                    p { class: "truncate text-sm text-body", if project.description.is_empty() { "No description" } else { "{project.description}" } }
+                }
+                span { class: "self-center text-center text-sm text-body", "Today" }
+            }
+            div { class: "flex items-center justify-start gap-2",
+                button { class: "rounded-md bg-semantic-down/10 px-3 py-1.5 text-xs font-semibold text-semantic-down hover:bg-semantic-down/20", onclick: move |_| on_delete.call(delete_project_id.clone()), "Delete" }
             }
         }
     }

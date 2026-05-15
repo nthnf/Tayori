@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
-use tayori_core::service::{SettingsFormView, WhisperModelView};
+use tayori_core::service::{
+    SettingsFormView, WhisperModelView, DENSE_MODEL_OPTIONS, RERANKER_MODEL_OPTIONS,
+    SPARSE_MODEL_OPTIONS,
+};
 
 use crate::types::Theme;
 
@@ -8,17 +11,30 @@ pub fn SettingsPage(
     mut theme: Signal<Theme>,
     mut settings: Signal<SettingsFormView>,
     saved_settings: Signal<SettingsFormView>,
-    whisper_model: Signal<Option<WhisperModelView>>,
-    on_check_whisper_model: EventHandler<String>,
+    whisper_models: Signal<Vec<WhisperModelView>>,
+    on_check_whisper_models: EventHandler<MouseEvent>,
     on_install_whisper_model: EventHandler<String>,
     on_remove_whisper_model: EventHandler<String>,
     on_save: EventHandler<SettingsFormView>,
 ) -> Element {
     let mut show_api_key_dialog = use_signal(|| false);
     let mut show_whisper_dialog = use_signal(|| false);
+    let mut show_rebuild_dialog = use_signal(|| false);
     let has_changes = settings() != saved_settings();
+    let search_models_changed = {
+        let settings = settings.read();
+        let saved = saved_settings.read();
+        settings.embedding_model != saved.embedding_model
+            || settings.sparse_model != saved.sparse_model
+    };
 
-    let save_changes = move |_| on_save.call(settings());
+    let save_changes = move |_| {
+        if search_models_changed {
+            show_rebuild_dialog.set(true);
+        } else {
+            on_save.call(settings());
+        }
+    };
 
     let reset_changes = move |_| {
         let saved = saved_settings();
@@ -58,14 +74,14 @@ pub fn SettingsPage(
                     on_manage: move |_| show_api_key_dialog.set(true),
                 }
                 ReadOnlyRow { name: "Embedding provider".to_string(), description: "Embedding runtime used for document chunks and transcript summaries.".to_string(), value: settings.read().embedding_provider.clone() }
-                TextRow { name: "Embedding model".to_string(), description: "Model used to embed document chunks and summaries.".to_string(), value: settings.read().embedding_model.clone(), placeholder: "jinaai/jina-embeddings-v2-base-code".to_string(), oninput: move |value| settings.write().embedding_model = value }
-                TextRow { name: "Sparse model".to_string(), description: "Model used to create sparse index/value vectors for hybrid retrieval.".to_string(), value: settings.read().sparse_model.clone(), placeholder: "prithivida/splade_pp_en_v1".to_string(), oninput: move |value| settings.write().sparse_model = value }
-                TextRow { name: "Reranker model".to_string(), description: "Model used to re-rank retrieved document and transcript matches.".to_string(), value: settings.read().reranker_model.clone(), placeholder: "jinaai/jina-reranker-v1-turbo-en".to_string(), oninput: move |value| settings.write().reranker_model = value }
+                SelectRow { name: "Dense model".to_string(), description: "Model used to understand document and meeting text.".to_string(), value: settings.read().embedding_model.clone(), options: model_options(DENSE_MODEL_OPTIONS), oninput: move |value| settings.write().embedding_model = value }
+                SelectRow { name: "Sparse model".to_string(), description: "Model used to match exact words and phrases in saved content.".to_string(), value: settings.read().sparse_model.clone(), options: model_options(SPARSE_MODEL_OPTIONS), oninput: move |value| settings.write().sparse_model = value }
+                SelectRow { name: "Rerank model".to_string(), description: "Model used to sort the best matches before answering.".to_string(), value: settings.read().reranker_model.clone(), options: model_options(RERANKER_MODEL_OPTIONS), oninput: move |value| settings.write().reranker_model = value }
                 WhisperModelRow {
                     model_name: settings.read().whisper_model.clone(),
                     oninput: move |value| settings.write().whisper_model = value,
-                    on_manage: move |_| {
-                        on_check_whisper_model.call(settings.read().whisper_model.clone());
+                    on_manage: move |event| {
+                        on_check_whisper_models.call(event);
                         show_whisper_dialog.set(true);
                     }
                 }
@@ -86,21 +102,47 @@ pub fn SettingsPage(
                         settings.write().remove_llm_api_key = true;
                         show_api_key_dialog.set(false);
                     },
+                    on_accept: move |api_key| {
+                        let mut form = settings();
+                        form.new_llm_api_key = api_key;
+                        form.remove_llm_api_key = false;
+                        settings.set(form.clone());
+                        show_api_key_dialog.set(false);
+                        if search_models_changed {
+                            show_rebuild_dialog.set(true);
+                        } else {
+                            on_save.call(form);
+                        }
+                    },
                     on_close: move |_| show_api_key_dialog.set(false),
                 }
             }
 
             if show_whisper_dialog() {
                 WhisperModelDialog {
-                    status: whisper_model(),
-                    model_name: settings.read().whisper_model.clone(),
-                    on_install: move |_| on_install_whisper_model.call(settings.read().whisper_model.clone()),
-                    on_remove: move |_| on_remove_whisper_model.call(settings.read().whisper_model.clone()),
+                    models: whisper_models(),
+                    selected_model: settings.read().whisper_model.clone(),
+                    on_install: move |model_name| on_install_whisper_model.call(model_name),
+                    on_remove: move |model_name| on_remove_whisper_model.call(model_name),
                     on_close: move |_| show_whisper_dialog.set(false),
+                }
+            }
+
+            if show_rebuild_dialog() {
+                RebuildWarningDialog {
+                    on_cancel: move |_| show_rebuild_dialog.set(false),
+                    on_confirm: move |_| {
+                        show_rebuild_dialog.set(false);
+                        on_save.call(settings());
+                    },
                 }
             }
         }
     }
+}
+
+fn model_options(options: &[&str]) -> Vec<String> {
+    options.iter().map(|option| option.to_string()).collect()
 }
 
 #[component]
@@ -125,57 +167,65 @@ fn WhisperModelRow(
 
 #[component]
 fn WhisperModelDialog(
-    status: Option<WhisperModelView>,
-    model_name: String,
-    on_install: EventHandler<MouseEvent>,
-    on_remove: EventHandler<MouseEvent>,
+    models: Vec<WhisperModelView>,
+    selected_model: String,
+    on_install: EventHandler<String>,
+    on_remove: EventHandler<String>,
     on_close: EventHandler<MouseEvent>,
 ) -> Element {
-    let display_name = status
-        .as_ref()
-        .map(|status| status.model_name.clone())
-        .unwrap_or(model_name);
-    let installed = status
-        .as_ref()
-        .map(|status| status.installed)
-        .unwrap_or(false);
-    let path = status
-        .as_ref()
-        .map(|status| status.path.clone())
-        .unwrap_or_else(|| "Checking model path...".to_string());
-    let state = if installed {
-        "Installed"
-    } else {
-        "Not installed"
-    };
-
     rsx! {
         div { class: "absolute inset-0 z-20 grid place-items-center bg-black/30 p-4",
-            div { class: "w-full max-w-md rounded-lg border border-hairline bg-canvas p-5 shadow-2xl",
+            div { class: "flex max-h-[82vh] w-full max-w-2xl flex-col rounded-lg border border-hairline bg-canvas p-5 shadow-2xl",
                 div { class: "mb-4 flex items-start justify-between gap-4",
                     div {
                         h3 { class: "text-lg font-semibold text-ink", "Manage Whisper model" }
-                        p { class: "mt-1 text-sm text-body", "Install or remove the local model used for speech-to-text." }
+                        p { class: "mt-1 text-sm text-body", "Install or remove local speech-to-text models." }
                     }
-                    button { class: "rounded-md px-2 py-1 text-body hover:bg-surface-soft", onclick: move |event| on_close.call(event), "Esc" }
+                    button { class: "rounded-md px-2 py-1 text-body hover:bg-surface-soft", onclick: move |event| on_close.call(event), "Close" }
                 }
 
-                div { class: "grid gap-3 rounded-md border border-hairline bg-surface-soft p-3 text-sm",
-                    div {
-                        p { class: "font-semibold text-ink", "{display_name}" }
-                        p { class: if installed { "text-semantic-up" } else { "text-semantic-down" }, "{state}" }
+                div { class: "min-h-0 overflow-auto rounded-md border border-hairline",
+                    div { class: "grid grid-cols-[1fr_120px_100px] gap-3 border-b border-hairline bg-surface-soft px-4 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted",
+                        span { "Model" }
+                        span { "Status" }
+                        span { "Action" }
                     }
-                    p { class: "break-all text-body", "{path}" }
+                    div { class: "divide-y divide-hairline",
+                        for model in models {
+                            WhisperModelListRow {
+                                model: model.clone(),
+                                selected: model.model_name == selected_model,
+                                on_install,
+                                on_remove,
+                            }
+                        }
+                    }
                 }
+            }
+        }
+    }
+}
 
-                div { class: "mt-5 flex justify-end gap-2",
-                    button { class: "rounded-md px-4 py-2 text-sm font-semibold text-body hover:bg-surface-soft", onclick: move |event| on_close.call(event), "Close" }
-                    if installed {
-                        button { class: "rounded-md bg-semantic-down/10 px-4 py-2 text-sm font-semibold text-semantic-down hover:bg-semantic-down/20", onclick: move |event| on_remove.call(event), "Remove" }
-                    } else {
-                        button { class: "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active", onclick: move |event| on_install.call(event), "Install" }
-                    }
+#[component]
+fn WhisperModelListRow(
+    model: WhisperModelView,
+    selected: bool,
+    on_install: EventHandler<String>,
+    on_remove: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div { class: "grid grid-cols-[1fr_120px_100px] gap-3 px-4 py-3 text-sm hover:bg-surface-soft",
+            div {
+                p { class: "font-semibold text-ink", "{model.model_name}" }
+                if selected {
+                    p { class: "mt-1 text-xs text-primary", "Selected in settings" }
                 }
+            }
+            span { class: if model.installed { "self-center text-semantic-up" } else { "self-center text-body" }, if model.installed { "Installed" } else { "Not installed" } }
+            if model.installed {
+                button { class: "self-center rounded-md bg-semantic-down/10 px-3 py-1.5 text-xs font-semibold text-semantic-down hover:bg-semantic-down/20", onclick: move |_| on_remove.call(model.model_name.clone()), "Remove" }
+            } else {
+                button { class: "self-center rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary hover:bg-primary-active", onclick: move |_| on_install.call(model.model_name.clone()), "Install" }
             }
         }
     }
@@ -216,9 +266,9 @@ fn ApiKeyRow(
                 p { class: "font-semibold text-ink", "API key" }
                 p { class: "mt-1 text-sm text-body", "Stored in the OS keyring. Add a new key to replace the existing one, or remove it." }
             }
-            div { class: "grid gap-2",
-                div { class: "rounded-md border border-hairline bg-surface-soft px-3 py-2 text-body", "{current}" }
-                button { class: "justify-self-start rounded-md bg-surface-strong px-3 py-2 text-sm font-semibold text-ink hover:bg-hairline", onclick: move |event| on_manage.call(event), "Manage" }
+            div { class: "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2",
+                div { class: "min-w-0 truncate rounded-md border border-hairline bg-surface-soft px-3 py-2 text-body", "{current}" }
+                button { class: "rounded-md bg-surface-strong px-3 py-2 text-sm font-semibold text-ink hover:bg-hairline", onclick: move |event| on_manage.call(event), "Manage" }
             }
         }
     }
@@ -230,6 +280,7 @@ fn ApiKeyDialog(
     new_value: String,
     oninput: EventHandler<String>,
     on_remove: EventHandler<MouseEvent>,
+    on_accept: EventHandler<String>,
     on_close: EventHandler<MouseEvent>,
 ) -> Element {
     let has_key = !preview.is_empty();
@@ -239,6 +290,7 @@ fn ApiKeyDialog(
         "Create API key"
     };
     let action = if has_key { "Replace" } else { "Create" };
+    let accept_value = new_value.clone();
 
     rsx! {
         div { class: "absolute inset-0 z-20 grid place-items-center bg-black/30 p-4",
@@ -248,14 +300,14 @@ fn ApiKeyDialog(
                         h3 { class: "text-lg font-semibold text-ink", "{title}" }
                         p { class: "mt-1 text-sm text-body", "Only one LLM API key is stored. Saving a new key fully replaces the previous key in the OS keyring." }
                     }
-                    button { class: "rounded-md px-2 py-1 text-body hover:bg-surface-soft", onclick: move |event| on_close.call(event), "Esc" }
+                    button { class: "rounded-md px-2 py-1 text-body hover:bg-surface-soft", onclick: move |event| on_close.call(event), "Close" }
                 }
 
                 if has_key {
                     div { class: "mb-4 rounded-md border border-hairline bg-surface-soft px-3 py-2 text-sm text-body", "Current: {preview}" }
                 }
 
-                input { class: "w-full rounded-md border border-hairline bg-canvas px-3 py-2 text-ink outline-none focus:border-primary", r#type: "password", value: new_value, placeholder: "New API key", oninput: move |event| oninput.call(event.value()) }
+                input { class: "w-full rounded-md border border-hairline bg-canvas px-3 py-2 text-ink outline-none focus:border-primary", r#type: "text", value: new_value, placeholder: "New API key", oninput: move |event| oninput.call(event.value()) }
 
                 div { class: "mt-5 flex justify-between gap-2",
                     div {
@@ -265,8 +317,50 @@ fn ApiKeyDialog(
                     }
                     div { class: "flex gap-2",
                         button { class: "rounded-md px-4 py-2 text-sm font-semibold text-body hover:bg-surface-soft", onclick: move |event| on_close.call(event), "Cancel" }
-                        button { class: "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active", onclick: move |event| on_close.call(event), "{action}" }
+                        button { class: "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active", onclick: move |_| on_accept.call(accept_value.clone()), "{action}" }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RebuildWarningDialog(
+    on_cancel: EventHandler<MouseEvent>,
+    on_confirm: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+        div { class: "absolute inset-0 z-20 grid place-items-center bg-black/30 p-4",
+            div { class: "w-full max-w-md rounded-lg border border-hairline bg-canvas p-5 shadow-2xl",
+                h3 { class: "text-lg font-semibold text-ink", "Prepare saved content again?" }
+                p { class: "mt-2 text-sm leading-relaxed text-body", "Changing the dense or sparse model means Tayori needs to prepare your existing documents and meeting notes again so search and answers keep working. This may take some time." }
+                div { class: "mt-5 flex justify-end gap-2",
+                    button { class: "rounded-md px-4 py-2 text-sm font-semibold text-body hover:bg-surface-soft", onclick: move |event| on_cancel.call(event), "Cancel" }
+                    button { class: "rounded-md bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-active", onclick: move |event| on_confirm.call(event), "Continue" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SelectRow(
+    name: String,
+    description: String,
+    value: String,
+    options: Vec<String>,
+    oninput: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div { class: "grid gap-3 py-4 md:grid-cols-[minmax(220px,1fr)_minmax(280px,420px)] md:items-center",
+            div {
+                p { class: "font-semibold text-ink", "{name}" }
+                p { class: "mt-1 text-sm text-body", "{description}" }
+            }
+            select { class: "rounded-md border border-hairline bg-canvas px-3 py-2 text-black outline-none focus:border-primary", value, onchange: move |event| oninput.call(event.value()),
+                for option in options {
+                    option { class: "text-black", value: option.clone(), "{option}" }
                 }
             }
         }

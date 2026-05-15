@@ -145,6 +145,23 @@ impl Storage {
         Ok(())
     }
 
+    /// Delete all LanceDB transcript summaries for one project.
+    pub async fn delete_lance_transcript_summaries_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<()> {
+        let table = self
+            .lancedb
+            .open_table(TRANSCRIPT_SUMMARIES_TABLE)
+            .execute()
+            .await?;
+        table
+            .delete(&format!("project_id = '{}'", escape_sql_string(project_id)))
+            .await?;
+
+        Ok(())
+    }
+
     /// Search transcript summaries by vector similarity inside a project.
     pub async fn search_lance_transcript_summaries_by_vector(
         &self,
