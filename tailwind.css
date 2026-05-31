@@ -1,0 +1,67 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+
+@theme {
+  --color-primary: #0052ff;
+  --color-primary-active: #003ecc;
+  --color-primary-disabled: #a8b8cc;
+  --color-canvas: #ffffff;
+  --color-surface-soft: #f7f7f7;
+  --color-surface-strong: #eef0f3;
+  --color-surface-dark: #0a0b0d;
+  --color-surface-dark-elevated: #16181c;
+  --color-hairline: #dee1e6;
+  --color-ink: #0a0b0d;
+  --color-body: #5b616e;
+  --color-muted: #7c828a;
+  --color-on-primary: #ffffff;
+  --color-on-dark: #ffffff;
+  --color-on-dark-soft: #a8acb3;
+  --color-semantic-up: #05b169;
+  --color-semantic-down: #cf202f;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --color-primary: #0052ff;
+    --color-primary-active: #003ecc;
+    --color-primary-disabled: #a8b8cc;
+    --color-canvas: #ffffff;
+    --color-surface-soft: #f7f7f7;
+    --color-surface-strong: #eef0f3;
+    --color-surface-dark: #0a0b0d;
+    --color-surface-dark-elevated: #16181c;
+    --color-hairline: #dee1e6;
+    --color-ink: #0a0b0d;
+    --color-body: #5b616e;
+    --color-muted: #7c828a;
+    --color-on-primary: #ffffff;
+    --color-on-dark: #ffffff;
+    --color-on-dark-soft: #a8acb3;
+    --color-semantic-up: #05b169;
+    --color-semantic-down: #cf202f;
+  }
+
+  .dark {
+    color-scheme: dark;
+    --color-primary: #2d6bff;
+    --color-primary-active: #5a8cff;
+    --color-primary-disabled: #3f5275;
+    --color-canvas: #0a0b0d;
+    --color-surface-soft: #111318;
+    --color-surface-strong: #16181c;
+    --color-surface-dark: #050608;
+    --color-surface-dark-elevated: #16181c;
+    --color-hairline: #2a2e36;
+    --color-ink: #ffffff;
+    --color-body: #a8acb3;
+    --color-muted: #7c828a;
+    --color-on-primary: #ffffff;
+    --color-on-dark: #ffffff;
+    --color-on-dark-soft: #a8acb3;
+    --color-semantic-up: #05b169;
+    --color-semantic-down: #ff6b78;
+  }
+}

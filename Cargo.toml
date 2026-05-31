@@ -1,0 +1,85 @@
+[package]
+name = "tayori"
+version = "0.1.0"
+authors = ["Nathan Farrel <nathanfarrel1128@gmail.com>"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace]
+resolver = "3"
+members = ["migration"]
+
+[dependencies]
+dioxus = { version = "0.7.9", features = ["router"] }
+migration = { path = "migration" }
+tokio = { version = "1.52.3", features = ["full"] }
+reqwest = { version = "0.13.3", features = ["stream"] }
+chunk = "0.10.1"
+sha2 = "0.11.0"
+hex = "0.4.3"
+anyhow = "1.0.102"
+tracing = "0.1.44"
+rubato = "3.0.0"
+ringbuf = "0.5.0"
+sqlx = { version = "0.8.6", features = ["sqlite"] }
+tar = "0.4.46"
+flate2 = "1.1.9"
+fastembed = "5.13.4"
+sea-orm = { version = "2.0.0-rc.38", features = [
+  "sqlx-sqlite",
+  "runtime-tokio",
+  "macros",
+  "with-chrono",
+  "with-uuid",
+] }
+llm = { version = "1.3.8", default-features = false, features = ["openai"] }
+futures = "0.3.32"
+pdf-extract = "0.10.0"
+zip = "8.6.0"
+quick-xml = "0.40.1"
+uuid = { version = "1.23.1", features = ["v4"] }
+chrono = "0.4.44"
+rfd = "0.17.2"
+ort = "2.0.0-rc.12"
+ndarray = "0.17.2"
+tokenizers = "0.23.1"
+log = "0.4.29"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+serde_json = "1.0.150"
+rustfft = "6.4.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "078787ee8061c41fc3198e3a39d55238bc68fa4d", features = [
+  "pipewire",
+  "pulseaudio",
+] }
+keyring = { version = "3.6.3", default-features = false, features = [
+  "sync-secret-service",
+  "crypto-rust",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "078787ee8061c41fc3198e3a39d55238bc68fa4d" }
+keyring = { version = "3.6.3", default-features = false, features = [
+  "windows-native",
+] }
+
+
+[features]
+default = ["desktop"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+
+[dev-dependencies]
+tempfile = "3.27.0"
+walkdir = "2.5.0"
+
+[profile.dev.package.rubato]
+opt-level = 3
+
+[profile.dev.package.fastembed]
+opt-level = 3
+
+
