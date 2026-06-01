@@ -30,7 +30,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tayori-windows
-          path: target/dx/tayori/release/bundle/msi/*.msi
+          path: target/dx/tayori/bundle/windows/nsis/*.exe
 
   build-linux:
     runs-on: ubuntu-latest
@@ -58,10 +58,42 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tayori-linux-appimage
-          path: target/dx/tayori/release/bundle/appimage/*.AppImage
+          path: target/dx/tayori/bundle/linux/appimage/*.AppImage
 
       - name: Upload Linux DEB
         uses: actions/upload-artifact@v4
         with:
           name: tayori-linux-deb
-          path: target/dx/tayori/release/bundle/deb/*.deb
+          path: "**/*.deb"
+
+  publish-release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tayori-windows
+          path: dist/
+
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: tayori-linux-appimage
+          path: dist/
+
+      - name: Download Linux DEB
+        uses: actions/download-artifact@v4
+        with:
+          name: tayori-linux-deb
+          path: dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
