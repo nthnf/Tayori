@@ -232,7 +232,9 @@ impl ResampleWorker {
                         resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)
                     {
                         for &sample in &output_buffer[0][..frames_out] {
-                            let _ = output.try_push(sample);
+                            if let Err(_e) = output.try_push(sample) {
+                                tracing::trace!("Output ringbuffer full during flush, dropped sample");
+                            }
                         }
                     }
                 }

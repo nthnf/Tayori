@@ -2,11 +2,8 @@ use crate::backend::audio::runtime::AudioRuntime;
 use crate::backend::audio::source::AudioSource;
 use crate::backend::audio::transcript::{StableSegment, UiChunk};
 use crate::backend::detection::IntentDetector;
-use crate::backend::entities::{
-    session_answers, sessions, settings, transcript_chunks, transcript_summaries,
-};
+use crate::backend::entities::{session_answers, sessions, settings, transcript_chunks};
 use crate::backend::models::{install, llm::LlmModel};
-use crate::backend::search::smart_hybrid_search;
 use crate::state::AppState;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
@@ -109,10 +106,8 @@ impl LivePageModel {
 
         let (qa_tx, qa_rx) = broadcast::channel::<String>(100);
 
-        // 3. Initialize Embedder lazily
-        // Initialize the intent detector exactly once
-        let _ = self
-            .state
+        // 3. Initialize intent detector exactly once
+        self.state
             .detector
             .get_or_try_init(|| async {
                 IntentDetector::new().map_err(|e| anyhow!("Failed to create detector: {}", e))
@@ -120,30 +115,33 @@ impl LivePageModel {
             .await?;
 
         // 4. Initialize LLM if None
-        let mut llm_guard = self.state.llm.lock().await;
-        if llm_guard.is_none() {
-            let api_key = crate::backend::models::llm::read_api_key()
-                .map_err(|e| anyhow!("Failed to read API Key from secure storage: {}", e))?;
-            let model = LlmModel::new(settings.llm_model.clone(), api_key);
-            *llm_guard = Some(model);
-        }
-        drop(llm_guard);
+        self.state
+            .llm
+            .get_or_try_init(|| async {
+                let api_key = crate::backend::models::llm::read_api_key()
+                    .map_err(|e| anyhow!("Failed to read API Key from secure storage: {}", e))?;
+                Ok::<LlmModel, anyhow::Error>(LlmModel::new(settings.llm_model.clone(), api_key))
+            })
+            .await?;
+
+        let session_graph = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::backend::graph::SessionGraph::new(),
+        ));
 
         let ui_rx = runtime.ui_tx.subscribe();
         let segment_rx_for_db = runtime.segment_tx.subscribe();
         let segment_rx_for_qa = runtime.segment_tx.subscribe();
+        let segment_rx_for_graph = runtime.segment_tx.subscribe();
         let mut session_stop_rx_db = runtime.session_stop_tx.subscribe();
-        let mut session_stop_rx_sum = runtime.session_stop_tx.subscribe();
         let mut session_stop_rx_qa = runtime.session_stop_tx.subscribe();
+        let mut session_stop_rx_graph = runtime.session_stop_tx.subscribe();
 
-        let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<()>(100);
-
-        // 5. Spawn DB write loop for transcripts
+        // 5. Spawn DB write loop for transcripts & GraphRAG extraction
         let db_clone = db.clone();
         let session_id_clone = session_id.clone();
         let project_id_clone_for_db = project_id.clone();
         let mut rx = segment_rx_for_db;
-        let notify_tx_clone = notify_tx.clone();
+
         spawn(async move {
             loop {
                 tokio::select! {
@@ -152,20 +150,18 @@ impl LivePageModel {
                             Ok(segment) => {
                                 let duration_ms = segment.end_time.saturating_sub(segment.start_time) as i64;
                                 let chunk = transcript_chunks::ActiveModel {
-                                    id: Set(uuid::Uuid::new_v4().to_string()),
+                                    id: Set(segment.id.to_string()),
                                     session_id: Set(session_id_clone.clone()),
                                     project_id: Set(project_id_clone_for_db.clone()),
                                     chunk_index: Set(segment.start_time as i64),
                                     start_ms: Set(segment.start_time as i64),
                                     end_ms: Set(segment.end_time as i64),
                                     duration_ms: Set(duration_ms),
-                                    text: Set(segment.full_text),
+                                    text: Set(segment.full_text.clone()),
                                     created_at: Set(Utc::now()),
                                 };
                                 if let Err(e) = chunk.insert(&db_clone).await {
                                     error!("Failed to save transcript chunk: {}", e);
-                                } else if let Err(e) = notify_tx_clone.send(()).await {
-                                    tracing::error!("Failed to notify transcript summarizer: {:?}", e);
                                 }
                             }
                             Err(_) => break,
@@ -179,170 +175,70 @@ impl LivePageModel {
             }
         });
 
-        // 5.5 Spawn Transcript Summarizer Worker
-        let db_summarizer = db.clone();
-        let session_id_summarizer = session_id.clone();
-        let project_id_summarizer = project_id.clone();
-        let state_summarizer = self.state.clone();
-        let settings_clone = settings.clone();
-
+        // 5.5 Spawn GraphRAG processing loop
+        let state_clone_for_graph = self.state.clone();
+        let session_graph_for_graph = session_graph.clone();
+        let mut rx_graph = segment_rx_for_graph;
         spawn(async move {
-            let target_duration_ms = settings_clone.summary_minutes * 60 * 1000;
-            if target_duration_ms <= 0 {
-                return; // Summarization disabled
-            }
-
             loop {
-                // Wait for a new chunk or channel closed (session ended/paused)
-                let flush = tokio::select! {
-                    val = notify_rx.recv() => {
-                        val.is_none()
-                    }
-                    _ = session_stop_rx_sum.recv() => {
-                        tracing::info!("Summarizer loop received stop signal. Exiting.");
-                        break;
-                    }
-                };
-
-                loop {
-                    // Fetch the max summary index
-                    let last_summary = transcript_summaries::Entity::find()
-                        .filter(
-                            transcript_summaries::Column::SessionId
-                                .eq(session_id_summarizer.clone()),
-                        )
-                        .order_by_desc(transcript_summaries::Column::ChunkEndIndex)
-                        .one(&db_summarizer)
-                        .await
-                        .unwrap_or(None);
-
-                    let start_idx = last_summary
-                        .as_ref()
-                        .map(|s| s.chunk_end_index)
-                        .unwrap_or(-1);
-                    let summary_idx = last_summary
-                        .as_ref()
-                        .map(|s| s.summary_index + 1)
-                        .unwrap_or(0);
-
-                    // Fetch unprocessed chunks
-                    let chunks = transcript_chunks::Entity::find()
-                        .filter(
-                            transcript_chunks::Column::SessionId.eq(session_id_summarizer.clone()),
-                        )
-                        .filter(transcript_chunks::Column::ChunkIndex.gt(start_idx))
-                        .order_by_asc(transcript_chunks::Column::ChunkIndex)
-                        .all(&db_summarizer)
-                        .await
-                        .unwrap_or_default();
-
-                    if chunks.is_empty() {
-                        break;
-                    }
-
-                    let total_dur: i64 = chunks.iter().map(|c| c.duration_ms).sum();
-
-                    if total_dur >= target_duration_ms || flush {
-                        // Group chunk texts
-                        let combined_text = chunks
-                            .iter()
-                            .map(|c| c.text.clone())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let Some(first_chunk) = chunks.first() else {
-                            break;
-                        };
-                        let Some(last_chunk) = chunks.last() else {
-                            break;
-                        };
-                        let chunk_start_index = first_chunk.chunk_index;
-                        let chunk_end_index = last_chunk.chunk_index;
-                        let start_ms = first_chunk.start_ms;
-                        let end_ms = last_chunk.end_ms;
-
-                        // LLM summary
-                        let prompt = format!(
-                            "Please summarize the following transcription segment concisely:\n\n{}",
-                            combined_text
-                        );
-
-                        let mut summary_text = String::new();
-                        let llm_opt = {
-                            let llm_guard = state_summarizer.llm.lock().await;
-                            llm_guard.clone()
-                        };
-
-                        if let Some(llm) = llm_opt {
-                            use futures::StreamExt;
-                            // Bypass context injection logic
-                            if let Ok(mut stream) = llm.ask_stream(&prompt, vec![], 0.0, 0.0).await
-                            {
-                                while let Some(res) = stream.next().await {
-                                    if let Ok(text) = res {
-                                        summary_text.push_str(&text);
+                tokio::select! {
+                    segment_res = rx_graph.recv() => {
+                        match segment_res {
+                            Ok(segment) => {
+                                let state_for_block = state_clone_for_graph.clone();
+                                let text_to_process = segment.full_text.clone();
+                                let chunk_id = segment.id;
+                                let session_graph_clone = session_graph_for_graph.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Some(pos_model) = state_for_block.pos_model.get() {
+                                        match pos_model.extract_entities(&text_to_process) {
+                                            Ok(entities) => {
+                                                if entities.is_empty() { return; }
+                                                let mut graph = match session_graph_clone.write() {
+                                                    Ok(g) => g,
+                                                    Err(e) => {
+                                                        tracing::error!("Graph RwLock poisoned: {}", e);
+                                                        return;
+                                                    }
+                                                };
+                                                if entities.len() == 1 {
+                                                    let entity = &entities[0];
+                                                    graph.add_node(&entity.text, &entity.category);
+                                                    return;
+                                                }
+                                                for i in 0..entities.len() - 1 {
+                                                    let source = &entities[i];
+                                                    let target = &entities[i + 1];
+                                                    graph.add_edge(
+                                                        &source.text,
+                                                        &source.category,
+                                                        &target.text,
+                                                        &target.category,
+                                                        chunk_id,
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => tracing::error!("Failed to extract entities: {:?}", e),
+                                        }
                                     }
-                                }
+                                });
                             }
+                            Err(_) => break,
                         }
-
-                        if summary_text.is_empty() {
-                            summary_text = combined_text; // Fallback if LLM fails
-                        }
-
-                        // Embedding
-                        let mut vector_u8 = Vec::new();
-                        let embedder_opt = state_summarizer.embedder.clone();
-                        let summary_clone = summary_text.clone();
-
-                        let vecs_res = tokio::task::spawn_blocking(move || {
-                            if let Some(embedder) = embedder_opt.get()
-                                && let Ok(mut vecs) = embedder.embed(vec![summary_clone])
-                            {
-                                return vecs.pop();
-                            }
-                            None
-                        })
-                        .await
-                        .unwrap_or(None);
-
-                        if let Some(v) = vecs_res {
-                            vector_u8 = v.into_iter().flat_map(|f| f.to_le_bytes()).collect();
-                        }
-
-                        let new_summary = transcript_summaries::ActiveModel {
-                            id: Set(uuid::Uuid::new_v4().to_string()),
-                            project_id: Set(project_id_summarizer.clone()),
-                            session_id: Set(session_id_summarizer.clone()),
-                            summary_index: Set(summary_idx),
-                            chunk_start_index: Set(chunk_start_index),
-                            chunk_end_index: Set(chunk_end_index),
-                            start_ms: Set(start_ms),
-                            end_ms: Set(end_ms),
-                            duration_ms: Set(total_dur),
-                            summary: Set(summary_text),
-                            vector: Set(vector_u8),
-                            created_at: Set(Utc::now()),
-                        };
-
-                        if let Err(e) = new_summary.insert(&db_summarizer).await {
-                            error!("Failed to save transcript summary: {}", e);
-                            break; // Stop trying to avoid infinite loop
-                        }
-                    } else {
+                    }
+                    _ = session_stop_rx_graph.recv() => {
+                        tracing::info!("Graph loop received stop signal. Exiting.");
                         break;
                     }
-                }
-
-                if flush {
-                    break;
                 }
             }
         });
 
-        // 6. Spawn Detection & QA loop
+        // 6. Spawn Detection & QA loop using GraphRAG context
         let state_clone = self.state.clone();
         let session_id_clone2 = session_id.clone();
         let project_id_clone = project_id.clone();
+        let session_graph_for_qa = session_graph.clone();
         let mut qa_rx_loop = segment_rx_for_qa;
         let qa_tx_clone = qa_tx.clone();
         spawn(async move {
@@ -374,14 +270,12 @@ impl LivePageModel {
                             }
                         }
 
-                        // Execute CPU-bound detection and embedding in spawn_blocking
-                        // to avoid blocking the Tokio async executor thread.
-                        let embedder_cell = state_clone.embedder.clone();
+                        // Execute CPU-bound detection in spawn_blocking
                         let detector_cell = state_clone.detector.clone();
                         let text_clone = text.clone();
 
                         let blocking_result =
-                            tokio::task::spawn_blocking(move || -> Result<Option<Vec<f32>>> {
+                            tokio::task::spawn_blocking(move || -> Result<Option<String>> {
                                 let detector = detector_cell
                                     .get()
                                     .ok_or_else(|| anyhow!("Detector cell empty"))?;
@@ -394,24 +288,13 @@ impl LivePageModel {
                                     res.similarity
                                 );
 
-                                if !res.is_actionable {
-                                    return Ok(None);
-                                }
-
-                                tracing::info!("QA Stage 2 passed! Actionable query detected: '{}'", text_clone);
-
-                                // Only need the embedder once we know the query is actionable
-                                let embedder = embedder_cell
-                                    .get()
-                                    .ok_or_else(|| anyhow!("Embedder not yet initialized"))?;
-                                let mut vecs = embedder.embed(vec![text_clone])?;
-                                Ok(vecs.pop())
+                                Ok(res.extracted_query)
                             })
                             .await;
 
-                        let vector = match blocking_result {
-                            Ok(Ok(Some(v))) => v,
-                            Ok(Ok(None)) => continue, // Not actionable
+                        let extracted_query = match blocking_result {
+                            Ok(Ok(Some(query))) => query,
+                            Ok(Ok(None)) => continue,
                             Ok(Err(e)) => {
                                 error!("QA pipeline error: {}", e);
                                 continue;
@@ -422,7 +305,8 @@ impl LivePageModel {
                             }
                         };
 
-                        // Step C: Search + LLM — no locks held across await
+                        tracing::info!("QA Stage 2 passed! Actionable query detected: '{}'", extracted_query);
+
                         let db = &state_clone.db;
 
                         let send_qa = |msg: String| {
@@ -431,26 +315,37 @@ impl LivePageModel {
                             }
                         };
 
-                        send_qa(format!("[START_QA]:{}", text));
-
-                        let (max_cosine, max_bm25, candidates) =
-                            match smart_hybrid_search(db, &text, vector, Some(5)).await {
-                                Ok(res) => res,
-                                Err(e) => {
-                                    error!("Search error: {}", e);
-                                    send_qa(format!("Error: Context search failed: {}", e));
-                                    continue;
-                                }
-                            };
-
-                        // Clone LLM out of the lock so we don't hold it across .ask().await
-                        let llm_opt = {
-                            let llm_guard = state_clone.llm.lock().await;
-                            llm_guard.clone()
+                        // Query the in-memory session graph instead of smart_hybrid_search
+                        let facts = match session_graph_for_qa.read() {
+                            Ok(graph) => graph.find_matches(&extracted_query),
+                            Err(e) => {
+                                tracing::error!("Session graph poisoned: {}", e);
+                                vec![]
+                            }
                         };
+
+                        let candidates: Vec<crate::backend::search::SearchCandidate> = facts
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, fact)| crate::backend::search::SearchCandidate {
+                                id: format!("graph_fact_{}", i),
+                                source_type: "graph_relation".to_string(),
+                                content: fact,
+                                raw_score: 1.0,
+                            })
+                            .collect();
+
+                        let (max_cosine, max_bm25) = if candidates.is_empty() {
+                            (0.0, 0.0)
+                        } else {
+                            (1.0, 10.0)
+                        };
+
+                        let llm_opt = state_clone.llm.get().cloned();
 
                         let Some(llm) = llm_opt else {
                             error!("LLM not initialized");
+                            send_qa(format!("[START_QA]:{}", extracted_query));
                             send_qa(
                                 "Error: LLM not initialized. Please configure your API key.".to_string(),
                             );
@@ -459,7 +354,7 @@ impl LivePageModel {
 
                         let question = format!(
                             "Based on this snippet, what should be done? ({})",
-                            text
+                            extracted_query
                         );
                         match llm
                             .ask_stream(&question, candidates, max_cosine, max_bm25)
@@ -467,40 +362,65 @@ impl LivePageModel {
                         {
                             Ok(mut stream) => {
                                 use futures::StreamExt;
-                                let mut full_answer = String::new();
-                                let mut last_send = tokio::time::Instant::now();
+                                let mut full_response = String::new();
                                 while let Some(chunk) = stream.next().await {
-                                    if let Ok(text) = chunk {
-                                        full_answer.push_str(&text);
-                                        if last_send.elapsed().as_millis() > 500 {
-                                            send_qa(full_answer.clone());
-                                            last_send = tokio::time::Instant::now();
-                                        }
+                                    if let Ok(chunk_text) = chunk {
+                                        full_response.push_str(&chunk_text);
                                     }
                                 }
 
-                                if full_answer.trim().is_empty() {
-                                    send_qa("(LLM returned an empty response)".to_string());
-                                } else {
-                                    // Send the final result
-                                    send_qa(full_answer.clone());
-
-                                    let answer_model = session_answers::ActiveModel {
-                                        id: Set(uuid::Uuid::new_v4().to_string()),
-                                        session_id: Set(session_id_clone2.clone()),
-                                        project_id: Set(project_id_clone.clone()),
-                                        context: Set(None),
-                                        query: Set(text.clone()),
-                                        answer: Set(full_answer),
-                                        created_at: Set(Utc::now()),
-                                    };
-                                    if let Err(e) = answer_model.insert(db).await {
-                                        error!("Failed to save QA session: {}", e);
+                                // Clean formatting backticks if LLM wrapped JSON in markdown code blocks
+                                let cleaned_response = {
+                                    let mut s = full_response.trim();
+                                    if s.starts_with("```json") {
+                                        s = s.strip_prefix("```json").unwrap_or(s);
+                                    } else if s.starts_with("```") {
+                                        s = s.strip_prefix("```").unwrap_or(s);
                                     }
+                                    if s.ends_with("```") {
+                                        s = s.strip_suffix("```").unwrap_or(s);
+                                    }
+                                    s.trim()
+                                };
+
+                                use crate::backend::models::llm::LlmResponse;
+                                let parsed: Result<LlmResponse, serde_json::Error> = serde_json::from_str(cleaned_response);
+
+                                let (action_taken, answer) = match parsed {
+                                    Ok(res) => (res.action_taken, res.answer),
+                                    Err(err) => {
+                                        tracing::warn!("Failed to parse LLM response as JSON: {}. Text: {}", err, full_response);
+                                        (true, full_response)
+                                    }
+                                };
+
+                                if action_taken {
+                                    send_qa(format!("[START_QA]:{}", text));
+                                    if answer.trim().is_empty() {
+                                        send_qa("(LLM returned an empty response)".to_string());
+                                    } else {
+                                        send_qa(answer.clone());
+
+                                        let answer_model = session_answers::ActiveModel {
+                                            id: Set(uuid::Uuid::new_v4().to_string()),
+                                            session_id: Set(session_id_clone2.clone()),
+                                            project_id: Set(project_id_clone.clone()),
+                                            context: Set(None),
+                                            query: Set(text.clone()),
+                                            answer: Set(answer),
+                                            created_at: Set(Utc::now()),
+                                        };
+                                        if let Err(e) = answer_model.insert(db).await {
+                                            error!("Failed to save QA session: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    tracing::info!("QA Loop: Ignored speech segment as noise/non-actionable: '{}'", text);
                                 }
                             }
                             Err(e) => {
                                 error!("LLM QA error: {}", e);
+                                send_qa(format!("[START_QA]:{}", text));
                                 send_qa(format!("LLM Error: {}", e));
                             }
                         }

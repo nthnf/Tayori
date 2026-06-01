@@ -11,8 +11,9 @@ fn main() {
     dioxus::launch(App);
 }
 
-use sea_orm::EntityTrait;
-use tayori::backend::entities::settings;
+use chrono::Utc;
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use tayori::backend::entities::{sessions, settings};
 use tayori::backend::models::install;
 
 #[component]
@@ -30,6 +31,21 @@ fn App() -> Element {
             Migrator::up(&db, None).await?;
             init_vector_indexes(&db).await?;
 
+            // 3. Cleanup hanging sessions from previous runs (e.g. app closed forcefully)
+            let hanging_sessions = sessions::Entity::find()
+                .filter(sessions::Column::EndedAt.is_null())
+                .all(&db)
+                .await?;
+            for session in hanging_sessions {
+                let mut active_session: sessions::ActiveModel = session.into();
+                active_session.ended_at = Set(Some(Utc::now()));
+                active_session.status = Set("cancelled".to_string());
+                active_session.updated_at = Set(Utc::now());
+                if let Err(e) = active_session.update(&db).await {
+                    tracing::error!("Failed to cleanup hanging session: {}", e);
+                }
+            }
+
             // Fetch transcript model setting or use default
             let transcript_model = match settings::Entity::find_by_id("default").one(&db).await? {
                 Some(s) => s.transcript_model,
@@ -42,15 +58,29 @@ fn App() -> Element {
                 let moonshine_path = install::moonshine_path(&transcript_model, None);
                 if !moonshine_path.exists() {
                     ds.with_mut(|s| s.push(format!("Moonshine STT ({})", transcript_model)));
-                    let _ = install::install_moonshine(&transcript_model, None).await;
+                    if let Err(e) = install::install_moonshine(&transcript_model, None).await {
+                        tracing::error!("Failed to install moonshine model: {}", e);
+                    }
                     ds.with_mut(|s| s.retain(|x| !x.starts_with("Moonshine")));
                 }
 
                 let silero_path = install::default_silero_path(None);
                 if !silero_path.exists() {
                     ds.with_mut(|s| s.push("Silero VAD".to_string()));
-                    let _ = install::install_silero(None).await;
+                    if let Err(e) = install::install_silero(None).await {
+                        tracing::error!("Failed to install silero model: {}", e);
+                    }
                     ds.with_mut(|s| s.retain(|x| x != "Silero VAD"));
+                }
+
+                let pos_model_path = install::default_pos_model_path(None);
+                let pos_tokenizer_path = install::default_pos_tokenizer_path(None);
+                if !pos_model_path.exists() || !pos_tokenizer_path.exists() {
+                    ds.with_mut(|s| s.push("MobileBERT POS".to_string()));
+                    if let Err(e) = install::install_pos(None).await {
+                        tracing::error!("Failed to install POS model: {}", e);
+                    }
+                    ds.with_mut(|s| s.retain(|x| x != "MobileBERT POS"));
                 }
             });
 
@@ -81,18 +111,21 @@ fn App() -> Element {
     // 4. Inject the connected DB into AppState for all pages
     let state = use_context_provider(move || tayori::state::AppState::new(db.clone()));
 
-    // 5. Eagerly initialize the embedder and detector in the background
+    // 5. Eagerly initialize the embedder, detector, and graph pipeline in the background
     //    so they're ready before the user starts a live session.
     use_future(move || {
         let state = state.clone();
         async move {
             let embedder_cell = state.embedder.clone();
             let detector_cell = state.detector.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let pos_model_cell = state.pos_model.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
                 if embedder_cell.get().is_none() {
                     match tayori::backend::models::embed::Embedder::new() {
                         Ok(e) => {
-                            let _ = embedder_cell.set(e);
+                            if embedder_cell.set(e).is_err() {
+                                tracing::warn!("Embedder was already initialized.");
+                            }
                         }
                         Err(e) => tracing::error!("Failed to init embedder at startup: {e}"),
                     }
@@ -100,13 +133,37 @@ fn App() -> Element {
                 if detector_cell.get().is_none() {
                     match tayori::backend::detection::IntentDetector::new() {
                         Ok(d) => {
-                            let _ = detector_cell.set(d);
+                            if detector_cell.set(d).is_err() {
+                                tracing::warn!("Detector was already initialized.");
+                            }
                         }
                         Err(e) => tracing::error!("Failed to init detector at startup: {e}"),
                     }
                 }
+                if pos_model_cell.get().is_none() {
+                    let model_path = install::default_pos_model_path(None);
+                    let tokenizer_path = install::default_pos_tokenizer_path(None);
+                    if model_path.exists() && tokenizer_path.exists() {
+                        match tayori::backend::models::pos::PosModel::new(
+                            &model_path,
+                            &tokenizer_path,
+                        ) {
+                            Ok(gp) => {
+                                if pos_model_cell.set(gp).is_err() {
+                                    tracing::warn!("POS model was already initialized.");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to init pos model at startup: {e}")
+                            }
+                        }
+                    }
+                }
             })
-            .await;
+            .await
+            {
+                tracing::error!("Background initialization task panicked: {}", e);
+            }
         }
     });
 

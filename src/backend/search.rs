@@ -41,17 +41,6 @@ pub async fn smart_hybrid_search(
         .all(db)
         .await?;
 
-    let summary_vector_stmt = Statement::from_sql_and_values(
-        DbBackend::Sqlite,
-        "SELECT e.id, 'summary' as source_type, e.summary as content, (1.0 - v.distance) as raw_score FROM transcript_summaries AS e
-         JOIN vector_full_scan('transcript_summaries', 'vector', $1, 20) AS v
-         ON e.rowid = v.rowid",
-        vec![vector_to_values(&query_vector)],
-    );
-    let summary_vector_results = SearchCandidate::find_by_statement(summary_vector_stmt)
-        .all(db)
-        .await?;
-
     // Track Maximums
     let mut max_bm25: f64 = 0.0;
     let mut max_cosine: f64 = 0.0;
@@ -62,11 +51,6 @@ pub async fn smart_hybrid_search(
         }
     }
     for item in &document_vector_results {
-        if item.raw_score > max_cosine {
-            max_cosine = item.raw_score;
-        }
-    }
-    for item in &summary_vector_results {
         if item.raw_score > max_cosine {
             max_cosine = item.raw_score;
         }
@@ -84,13 +68,6 @@ pub async fn smart_hybrid_search(
     }
 
     for (rank, item) in document_vector_results.into_iter().enumerate() {
-        let score = 1.0 / (k + (rank + 1) as f64);
-        let key = (item.source_type.clone(), item.id.clone());
-        *score_map.entry(key.clone()).or_insert(0.0) += score;
-        item_map.entry(key).or_insert(item);
-    }
-
-    for (rank, item) in summary_vector_results.into_iter().enumerate() {
         let score = 1.0 / (k + (rank + 1) as f64);
         let key = (item.source_type.clone(), item.id.clone());
         *score_map.entry(key.clone()).or_insert(0.0) += score;

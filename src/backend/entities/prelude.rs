@@ -7,4 +7,3 @@ pub use super::session_answers::Entity as SessionAnswers;
 pub use super::sessions::Entity as Sessions;
 pub use super::settings::Entity as Settings;
 pub use super::transcript_chunks::Entity as TranscriptChunks;
-pub use super::transcript_summaries::Entity as TranscriptSummaries;

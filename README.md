@@ -33,7 +33,7 @@ It demonstrates production-grade systems engineering in Rust, low-latency audio 
 
 ## ⚡ Core Pipeline & Architecture
 
-Tayori utilizes a decoupled, multi-threaded worker architecture to ensure hardware audio captures run with zero latency and the UI maintains a fluid 60 FPS refresh rate.
+Tayori utilizes a decoupled, multi-threaded worker architecture to ensure hardware audio captures run with zero latency and the UI remains highly responsive.
 
 ```mermaid
 graph TD
@@ -59,10 +59,15 @@ graph TD
         STT -->|Stable Segments| Seg_Chan((Stable Segment Broadcast))
 
         Seg_Chan -->|Segment| DB_Loop[DB Writer Task]:::async
+        Seg_Chan -->|Segment| Graph_Loop[Graph & POS Task]:::async
         Seg_Chan -->|Segment| QA_Loop[Intent Detector & QA Task]:::async
 
         DB_Loop -->|Write Chunks| SQLite[(SQLite + Vector Ext)]
-        QA_Loop -->|Semantic Search| SQLite
+        
+        Graph_Loop -->|Extract Entities| POS[POS Model ONNX]
+        Graph_Loop -->|Build Relations| MemGraph((In-Memory Session Graph))
+
+        QA_Loop -->|Query Matches| MemGraph
         QA_Loop -->|Context + Query| LLM[LLM API / OpenAI]
         LLM -->|Live Tokens| QA_Chan[Q&A Live UI Signal]:::ui
 
@@ -91,6 +96,8 @@ graph TD
 | **Audio Resampling** | `rubato` (Sinc Resampler)    | Real-time asynchronous conversion to 16kHz mono audio                 |
 | **VAD Inference**    | Silero VAD (ONNX)            | Local, deep-learning based voice activity boundary detection          |
 | **Local STT**        | Moonshine STT (ONNX)         | High-accuracy local speech-to-text decoding                           |
+| **POS & Entities**   | Custom POS Model (ONNX)      | Real-time parts-of-speech tagging and entity extraction               |
+| **Context Memory**   | In-Memory Session Graph      | High-performance semantic relation mapping during active sessions     |
 | **Embeddings**       | FastEmbed                    | Fast, native execution of local text embedding models                 |
 | **Database**         | SQLite + Custom Vector Ext   | Full-text lexical search (FTS5) matched with vector similarity search |
 | **ORM Framework**    | SeaORM                       | Safe, structured ActiveRecord DB mappings                             |
@@ -102,7 +109,7 @@ graph TD
 
 - **Warm Model Caching:** Heavy Machine Learning models (Moonshine STT, Silero VAD, TinyBERT) are cached warm inside a global `AppState` on startup, allowing sessions to start and pause instantly (<1ms latency) without reloading files from disk.
 - **Leak-Free Session Boundaries:** Built around a custom broadcast signal loop (`session_stop_tx`), Tayori shuts down and drops old database/summarizer tasks on session end to prevent resource leaks and transcript data contamination.
-- **Intelligent Hybrid Search:** Automatically detects query intents in transcripts, retrieves relevant documentation via SQLite, and injects context into LLMs to generate real-time answers.
+- **Intelligent Contextual Q&A:** Automatically detects query intents using TinyBERT, builds an in-memory knowledge graph of entities mentioned via a custom POS model, and injects relevant context into LLMs to generate real-time answers.
 - **Persistent Dashboard:** Track history, view document vectors, manage project configurations, and delete or update sessions dynamically.
 
 ---

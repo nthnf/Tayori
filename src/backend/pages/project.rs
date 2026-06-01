@@ -1,5 +1,5 @@
 use crate::backend::entities::{
-    document_chunks, documents, session_answers, sessions, transcript_chunks, transcript_summaries,
+    document_chunks, documents, session_answers, sessions, transcript_chunks,
 };
 use crate::backend::upload;
 use crate::state::AppState;
@@ -82,7 +82,7 @@ impl ProjectPageModel {
 
         // Helper to mark failed
         let mark_failed = |err_msg: String, id: String| async move {
-            let _ = documents::Entity::update(documents::ActiveModel {
+            if let Err(e) = documents::Entity::update(documents::ActiveModel {
                 id: Set(id),
                 status: Set("failed".to_string()),
                 error_message: Set(Some(err_msg.clone())),
@@ -90,7 +90,9 @@ impl ProjectPageModel {
                 ..Default::default()
             })
             .exec(db)
-            .await;
+            .await {
+                tracing::error!("Failed to mark document as failed: {}", e);
+            }
             anyhow!("{}", err_msg)
         };
 
@@ -232,12 +234,6 @@ impl ProjectPageModel {
             .exec(db)
             .await
             .map_err(|e| anyhow!("Failed to delete transcript chunks: {}", e))?;
-
-        transcript_summaries::Entity::delete_many()
-            .filter(transcript_summaries::Column::SessionId.eq(session_id.clone()))
-            .exec(db)
-            .await
-            .map_err(|e| anyhow!("Failed to delete transcript summaries: {}", e))?;
 
         session_answers::Entity::delete_many()
             .filter(session_answers::Column::SessionId.eq(session_id.clone()))

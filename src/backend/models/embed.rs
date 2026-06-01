@@ -14,7 +14,7 @@ impl Embedder {
     pub fn new() -> Result<Self> {
         // Limit ONNX Runtime threads to prevent CPU spikes when embedding.
         // We ignore the result because ort can only be initialized once globally.
-        let _ = ort::init()
+        if !ort::init()
             .with_name("tayori-embedder")
             .with_global_thread_pool(
                 GlobalThreadPoolOptions::default()
@@ -23,7 +23,10 @@ impl Embedder {
                     .with_inter_threads(1)
                     .unwrap_or_default(),
             )
-            .commit();
+            .commit()
+        {
+            tracing::debug!("ort already initialized globally");
+        }
 
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(true),

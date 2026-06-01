@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 const SILERO_URL: &str =
     "https://huggingface.co/onnx-community/silero-vad/resolve/main/onnx/model_quantized.onnx";
 
+const POS_MODEL_URL: &str = "https://github.com/nthnf/Tayori/releases/download/POS/pos_model.onnx";
+
+const POS_TOKENIZER_URL: &str =
+    "https://github.com/nthnf/Tayori/releases/download/POS/pos_tokenizer.json";
+
 pub fn moonshine_url(size: &str) -> String {
     format!(
         "https://blob.handy.computer/moonshine-{}-streaming-en.tar.gz",
@@ -21,13 +26,25 @@ fn default_model_path() -> PathBuf {
 pub fn default_silero_path(base_path: Option<&Path>) -> PathBuf {
     let default_path = default_model_path();
     let base = base_path.unwrap_or(&default_path);
-    base.join("silero_vad.onnx")
+    base.join("silero").join("silero_vad.onnx")
 }
 
 pub fn moonshine_path(size: &str, base_path: Option<&Path>) -> PathBuf {
     let default_path = default_model_path();
     let base = base_path.unwrap_or(&default_path);
     base.join(format!("moonshine/{}", size))
+}
+
+pub fn default_pos_model_path(base_path: Option<&Path>) -> PathBuf {
+    let default_path = default_model_path();
+    let base = base_path.unwrap_or(&default_path);
+    base.join("pos").join("pos_model.onnx")
+}
+
+pub fn default_pos_tokenizer_path(base_path: Option<&Path>) -> PathBuf {
+    let default_path = default_model_path();
+    let base = base_path.unwrap_or(&default_path);
+    base.join("pos").join("pos_tokenizer.json")
 }
 
 pub async fn install_moonshine(size: &str, base_path: Option<&Path>) -> Result<PathBuf> {
@@ -99,6 +116,27 @@ pub fn list_installed_models(base_path: Option<&Path>) -> Result<Vec<String>> {
     }
 
     Ok(installed)
+}
+
+pub async fn install_pos(base_path: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
+    let model_target = default_pos_model_path(base_path);
+    let tokenizer_target = default_pos_tokenizer_path(base_path);
+
+    if let Some(parent) = model_target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // 1. Download model
+    let model_res = Client::new().get(POS_MODEL_URL).send().await?;
+    let model_bytes = model_res.bytes().await?;
+    fs::write(&model_target, model_bytes)?;
+
+    // 2. Download tokenizer
+    let tokenizer_res = Client::new().get(POS_TOKENIZER_URL).send().await?;
+    let tokenizer_bytes = tokenizer_res.bytes().await?;
+    fs::write(&tokenizer_target, tokenizer_bytes)?;
+
+    Ok((model_target, tokenizer_target))
 }
 
 #[cfg(test)]

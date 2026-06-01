@@ -35,8 +35,6 @@ pub enum Relation {
     SessionAnswers,
     #[sea_orm(has_many = "super::transcript_chunks::Entity")]
     TranscriptChunks,
-    #[sea_orm(has_many = "super::transcript_summaries::Entity")]
-    TranscriptSummaries,
 }
 
 impl Related<super::projects::Entity> for Entity {
@@ -54,12 +52,6 @@ impl Related<super::session_answers::Entity> for Entity {
 impl Related<super::transcript_chunks::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::TranscriptChunks.def()
-    }
-}
-
-impl Related<super::transcript_summaries::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::TranscriptSummaries.def()
     }
 }
 

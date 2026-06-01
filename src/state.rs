@@ -1,5 +1,6 @@
 use crate::backend::audio::runtime::AudioRuntime;
 use crate::backend::detection::IntentDetector;
+
 use crate::backend::models::embed::Embedder;
 use crate::backend::models::llm::LlmModel;
 use sea_orm::DatabaseConnection;
@@ -16,10 +17,11 @@ pub struct AppState {
     // Wrapped in Arc/Mutex so they can be mutated safely from any page
     // and are initialized lazily (Options) so we don't block app startup.
     pub audio_runtime: Arc<Mutex<Option<AudioRuntime>>>,
-    pub llm: Arc<Mutex<Option<LlmModel>>>,
+    pub llm: Arc<OnceCell<LlmModel>>,
     // Stateless once initialized, so OnceCell is perfect
     pub embedder: Arc<OnceCell<Embedder>>,
     pub detector: Arc<OnceCell<IntentDetector>>,
+    pub pos_model: Arc<OnceCell<crate::backend::models::pos::PosModel>>,
 }
 
 impl AppState {
@@ -27,9 +29,10 @@ impl AppState {
         Self {
             db,
             audio_runtime: Arc::new(Mutex::new(None)),
-            llm: Arc::new(Mutex::new(None)),
+            llm: Arc::new(OnceCell::new()),
             embedder: Arc::new(OnceCell::new()),
             detector: Arc::new(OnceCell::new()),
+            pos_model: Arc::new(OnceCell::new()),
         }
     }
 }

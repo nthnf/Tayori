@@ -16,9 +16,12 @@ use super::path::app_data_dir;
 pub async fn connect(uri: &str) -> Result<DatabaseConnection> {
     let vector_extension = vector_extension_path()?;
 
-    let options = SqliteConnectOptions::from_str(uri)?
-        .create_if_missing(true) // Ensure the file exists
-        .extension(vector_extension);
+    let mut options = SqliteConnectOptions::from_str(uri)?.create_if_missing(true); // Ensure the file exists
+
+    // sqlx 0.9.0 requires unsafe block for loading extensions
+    unsafe {
+        options = options.extension(vector_extension);
+    }
 
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -36,9 +39,8 @@ pub async fn connect(uri: &str) -> Result<DatabaseConnection> {
 pub async fn init_vector_indexes(db: &DatabaseConnection) -> Result<()> {
     let dim = super::models::embed::get_model_dim()?;
     let init_sql = format!(
-        "-- Dense vectors are stored on document chunks and transcript summaries\n\
-        SELECT vector_init('document_chunks', 'vector', 'type=FLOAT32,dimension={dim},distance=COSINE');\n\
-        SELECT vector_init('transcript_summaries', 'vector', 'type=FLOAT32,dimension={dim},distance=COSINE');"
+        "-- Dense vectors are stored on document chunks\n\
+        SELECT vector_init('document_chunks', 'vector', 'type=FLOAT32,dimension={dim},distance=COSINE');"
     );
 
     // Execute the raw queries against the active connection

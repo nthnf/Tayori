@@ -12,6 +12,8 @@ members = ["migration"]
 [dependencies]
 dioxus = { version = "0.7.9", features = ["router"] }
 migration = { path = "migration" }
+petgraph = "0.8.3"
+rust-stemmers = "1.2.0"
 tokio = { version = "1.52.3", features = ["full"] }
 reqwest = { version = "0.13.3", features = ["stream"] }
 chunk = "0.10.1"
@@ -21,11 +23,11 @@ anyhow = "1.0.102"
 tracing = "0.1.44"
 rubato = "3.0.0"
 ringbuf = "0.5.0"
-sqlx = { version = "0.8.6", features = ["sqlite"] }
+sqlx = { version = "0.9", features = ["sqlite"] }
 tar = "0.4.46"
 flate2 = "1.1.9"
 fastembed = "5.13.4"
-sea-orm = { version = "2.0.0-rc.38", features = [
+sea-orm = { version = "2.0.0-rc.40", features = [
   "sqlx-sqlite",
   "runtime-tokio",
   "macros",
@@ -81,5 +83,3 @@ opt-level = 3
 
 [profile.dev.package.fastembed]
 opt-level = 3
-
-

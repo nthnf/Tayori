@@ -23,6 +23,7 @@ pub struct UiChunk {
 
 #[derive(Clone, Debug)]
 pub struct StableSegment {
+    pub id: uuid::Uuid,
     pub start_time: u64,
     pub end_time: u64,
     pub full_text: String,
@@ -181,6 +182,7 @@ fn drain_and_process(
                     if is_end {
                         if !current_text.is_empty() {
                             if let Err(e) = segment_tx.send(StableSegment {
+                                id: uuid::Uuid::new_v4(),
                                 start_time: segment_start_ms,
                                 end_time: chunk.end_ms,
                                 full_text: current_text,

@@ -14,7 +14,6 @@ impl MigrationTrait for Migration {
         create_documents(manager).await?;
 
         create_transcript_chunks(manager).await?;
-        create_transcript_summaries(manager).await?;
         create_session_answers(manager).await?;
 
         create_document_chunks(manager).await?;
@@ -49,14 +48,6 @@ impl MigrationTrait for Migration {
         manager
             .drop_table(
                 Table::drop()
-                    .table(TranscriptSummaries::Table)
-                    .if_exists()
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .drop_table(
-                Table::drop()
                     .table(TranscriptChunks::Table)
                     .if_exists()
                     .to_owned(),
@@ -80,8 +71,6 @@ impl MigrationTrait for Migration {
         let sql = "
             DROP TRIGGER IF EXISTS fts_insert_chunks;
             DROP TRIGGER IF EXISTS fts_delete_chunks;
-            DROP TRIGGER IF EXISTS fts_insert_summaries;
-            DROP TRIGGER IF EXISTS fts_delete_summaries;
             DROP TRIGGER IF EXISTS fts_insert_docs;
             DROP TRIGGER IF EXISTS fts_delete_docs;
             DROP TABLE IF EXISTS global_fts;
@@ -438,90 +427,6 @@ async fn create_transcript_chunks(manager: &SchemaManager<'_>) -> Result<(), DbE
         .await
 }
 
-async fn create_transcript_summaries(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    manager
-        .create_table(
-            Table::create()
-                .table(TranscriptSummaries::Table)
-                .if_not_exists()
-                .col(
-                    ColumnDef::new(TranscriptSummaries::Id)
-                        .string()
-                        .not_null()
-                        .primary_key(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::ProjectId)
-                        .string()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::SessionId)
-                        .string()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::SummaryIndex)
-                        .integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::ChunkStartIndex)
-                        .integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::ChunkEndIndex)
-                        .integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::StartMs)
-                        .big_integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::EndMs)
-                        .big_integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::DurationMs)
-                        .big_integer()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::Summary)
-                        .text()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::Vector)
-                        .binary()
-                        .not_null(),
-                )
-                .col(
-                    ColumnDef::new(TranscriptSummaries::CreatedAt)
-                        .timestamp()
-                        .not_null()
-                        .default(Expr::current_timestamp()),
-                )
-                .foreign_key(
-                    ForeignKey::create()
-                        .name("fk_transcript_summaries_session_project")
-                        .from_tbl(TranscriptSummaries::Table)
-                        .from_col(TranscriptSummaries::SessionId)
-                        .from_col(TranscriptSummaries::ProjectId)
-                        .to_tbl(Sessions::Table)
-                        .to_col(Sessions::Id)
-                        .to_col(Sessions::ProjectId)
-                        .on_delete(ForeignKeyAction::Cascade),
-                )
-                .to_owned(),
-        )
-        .await
-}
-
 async fn create_session_answers(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .create_table(
@@ -678,54 +583,6 @@ async fn create_indexes(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .create_index(
             Index::create()
-                .name("idx_transcript_summaries_project_id")
-                .table(TranscriptSummaries::Table)
-                .col(TranscriptSummaries::ProjectId)
-                .if_not_exists()
-                .to_owned(),
-        )
-        .await?;
-
-    manager
-        .create_index(
-            Index::create()
-                .name("idx_transcript_summaries_session_id")
-                .table(TranscriptSummaries::Table)
-                .col(TranscriptSummaries::SessionId)
-                .if_not_exists()
-                .to_owned(),
-        )
-        .await?;
-
-    manager
-        .create_index(
-            Index::create()
-                .name("idx_transcript_summaries_session_summary")
-                .table(TranscriptSummaries::Table)
-                .col(TranscriptSummaries::SessionId)
-                .col(TranscriptSummaries::SummaryIndex)
-                .unique()
-                .if_not_exists()
-                .to_owned(),
-        )
-        .await?;
-
-    manager
-        .create_index(
-            Index::create()
-                .name("idx_transcript_summaries_chunk_range")
-                .table(TranscriptSummaries::Table)
-                .col(TranscriptSummaries::SessionId)
-                .col(TranscriptSummaries::ChunkStartIndex)
-                .col(TranscriptSummaries::ChunkEndIndex)
-                .if_not_exists()
-                .to_owned(),
-        )
-        .await?;
-
-    manager
-        .create_index(
-            Index::create()
                 .name("idx_session_answers_project_id")
                 .table(SessionAnswers::Table)
                 .col(SessionAnswers::ProjectId)
@@ -788,14 +645,6 @@ async fn create_fts_indexes(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             INSERT INTO global_fts (source_id, source_type, content) VALUES (NEW.id, 'transcript', NEW.text);
         END;
         CREATE TRIGGER IF NOT EXISTS fts_delete_chunks AFTER DELETE ON transcript_chunks BEGIN
-            DELETE FROM global_fts WHERE source_id = OLD.id;
-        END;
-
-        -- Sync Transcript Summaries
-        CREATE TRIGGER IF NOT EXISTS fts_insert_summaries AFTER INSERT ON transcript_summaries BEGIN
-            INSERT INTO global_fts (source_id, source_type, content) VALUES (NEW.id, 'summary', NEW.summary);
-        END;
-        CREATE TRIGGER IF NOT EXISTS fts_delete_summaries AFTER DELETE ON transcript_summaries BEGIN
             DELETE FROM global_fts WHERE source_id = OLD.id;
         END;
 
@@ -889,23 +738,6 @@ enum TranscriptChunks {
     StartMs,
     EndMs,
     DurationMs,
-    CreatedAt,
-}
-
-#[derive(DeriveIden)]
-enum TranscriptSummaries {
-    Table,
-    Id,
-    ProjectId,
-    SessionId,
-    SummaryIndex,
-    ChunkStartIndex,
-    ChunkEndIndex,
-    StartMs,
-    EndMs,
-    DurationMs,
-    Summary,
-    Vector,
     CreatedAt,
 }
 

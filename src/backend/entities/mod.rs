@@ -9,4 +9,3 @@ pub mod session_answers;
 pub mod sessions;
 pub mod settings;
 pub mod transcript_chunks;
-pub mod transcript_summaries;
