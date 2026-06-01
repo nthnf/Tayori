@@ -34,7 +34,14 @@ impl AudioDevice {
 
     /// Prefer PipeWire on Linux, then fall back to CPAL default host.
     fn make_host() -> cpal::Host {
-        cpal::host_from_id(cpal::HostId::PipeWire).unwrap_or_else(|_| cpal::default_host())
+        #[cfg(target_os = "linux")]
+        {
+            cpal::host_from_id(cpal::HostId::PipeWire).unwrap_or_else(|_| cpal::default_host())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            cpal::default_host()
+        }
     }
 
     /// Resolve a monitor-style input device by name.
