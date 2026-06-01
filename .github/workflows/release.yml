@@ -21,6 +21,8 @@ jobs:
         run: cargo install dioxus-cli --locked
 
       - name: Build Windows Installer
+        env:
+          RUSTFLAGS: "-C target-feature=-crt-static"
         run: dx bundle --release --platform desktop
 
       - name: Upload Windows Asset
@@ -38,7 +40,7 @@ jobs:
       - name: Install Linux Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libssl-dev pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+          sudo apt-get install -y libasound2-dev libssl-dev pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libpipewire-0.3-dev libpulse-dev clang libclang-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
