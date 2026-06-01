@@ -140,8 +140,8 @@ tayori-v2/
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/nthnf/tayori-v2.git
-cd tayori-v2
+git clone https://github.com/nthnf/tayori.git
+cd tayori
 
 # 2. Install the Dioxus CLI
 cargo install dioxus-cli
