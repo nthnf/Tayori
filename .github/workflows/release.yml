@@ -18,7 +18,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install Dioxus CLI
-        run: cargo install dioxus-cli
+        run: cargo install dioxus-cli --locked
 
       - name: Build Windows Installer
         run: dx bundle --release --platform desktop
@@ -46,7 +46,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Install Dioxus CLI
-        run: cargo install dioxus-cli
+        run: cargo install dioxus-cli --locked
 
       - name: Build Linux AppImage and DEB
         run: dx bundle --release --platform desktop
