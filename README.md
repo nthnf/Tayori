@@ -22,7 +22,7 @@
 
 ## 📖 Project Overview
 
-**Tayori** is a real-time desktop companion that sits in your workspace, capturing audio from your meetings (system audio monitor or physical microphone) to transcribe speech locally, index chunks semantically, and leverage LLMs to answer context-aware questions and summarize meetings as they happen.
+**Tayori** is a real-time desktop companion that sits in your workspace, capturing audio from your meetings (system audio monitor or physical microphone) to transcribe speech locally, index chunks semantically, and leverage LLMs to answer context-aware questions dynamically as they happen.
 
 It demonstrates production-grade systems engineering in Rust, low-latency audio processing pipelines, local Machine Learning (ML) inference, and a highly responsive desktop GUI.
 
@@ -70,11 +70,6 @@ graph TD
         QA_Loop -->|Query Matches| MemGraph
         QA_Loop -->|Context + Query| LLM[LLM API / OpenAI]
         LLM -->|Live Tokens| QA_Chan[Q&A Live UI Signal]:::ui
-
-        DB_Loop -->|Notify Chunk| Sum_Loop[Summarizer Task]:::async
-        Sum_Loop -->|Fetch Chunks| SQLite
-        Sum_Loop -->|Summarize| LLM
-        Sum_Loop -->|Save Summary| SQLite
     end
 
     subgraph GUI Layer
@@ -96,10 +91,10 @@ graph TD
 | **Audio Resampling** | `rubato` (Sinc Resampler)    | Real-time asynchronous conversion to 16kHz mono audio                 |
 | **VAD Inference**    | Silero VAD (ONNX)            | Local, deep-learning based voice activity boundary detection          |
 | **Local STT**        | Moonshine STT (ONNX)         | High-accuracy local speech-to-text decoding                           |
-| **POS & Entities**   | Custom POS Model (ONNX)      | Real-time parts-of-speech tagging and entity extraction               |
+| **POS & Entities**   | MobileBERT POS (ONNX)        | `mrm8488/mobilebert-finetuned-pos` for entity extraction              |
 | **Context Memory**   | In-Memory Session Graph      | High-performance semantic relation mapping during active sessions     |
 | **Embeddings**       | FastEmbed                    | Fast, native execution of local text embedding models                 |
-| **Database**         | SQLite + Custom Vector Ext   | Full-text lexical search (FTS5) matched with vector similarity search |
+| **Database**         | SQLite + `sqlite-vector`     | FTS5 matched with `sqliteai/sqlite-vector` similarity search          |
 | **ORM Framework**    | SeaORM                       | Safe, structured ActiveRecord DB mappings                             |
 | **Async Executor**   | Tokio (Multi-threaded)       | Non-blocking thread scheduling and database/IO multiplexing           |
 
@@ -108,7 +103,7 @@ graph TD
 ## ✨ Features Walkthrough
 
 - **Warm Model Caching:** Heavy Machine Learning models (Moonshine STT, Silero VAD, TinyBERT) are cached warm inside a global `AppState` on startup, allowing sessions to start and pause instantly (<1ms latency) without reloading files from disk.
-- **Leak-Free Session Boundaries:** Built around a custom broadcast signal loop (`session_stop_tx`), Tayori shuts down and drops old database/summarizer tasks on session end to prevent resource leaks and transcript data contamination.
+- **Leak-Free Session Boundaries:** Built around a custom broadcast signal loop (`session_stop_tx`), Tayori shuts down and drops old database tasks on session end to prevent resource leaks and transcript data contamination.
 - **Intelligent Contextual Q&A:** Automatically detects query intents using TinyBERT, builds an in-memory knowledge graph of entities mentioned via a custom POS model, and injects relevant context into LLMs to generate real-time answers.
 - **Persistent Dashboard:** Track history, view document vectors, manage project configurations, and delete or update sessions dynamically.
 
