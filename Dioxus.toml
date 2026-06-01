@@ -3,6 +3,7 @@ name = "tayori"
 
 [bundle]
 identifier = "com.tayori.app"
+publisher = "nthnf"
 
 [web.app]
 

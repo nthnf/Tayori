@@ -22,7 +22,8 @@ jobs:
 
       - name: Build Windows Installer
         env:
-          RUSTFLAGS: "-C target-feature=-crt-static -C link-arg=/NODEFAULTLIB:libcmt -C link-arg=/NODEFAULTLIB:libcpmt"
+          CFLAGS: "-MD"
+          CXXFLAGS: "-MD"
         run: dx bundle --release --platform desktop
 
       - name: Upload Windows Asset
