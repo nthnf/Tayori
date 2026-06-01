@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
                 if !entities.is_empty() {
                     if entities.len() == 1 {
                         let entity = &entities[0];
-                        graph.add_node(&entity.text, &entity.category);
+                        graph.add_node(&entity.text, &entity.category, chunk_id);
                     } else {
                         for i in 0..entities.len() - 1 {
                             let source = &entities[i];
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Query: \"{}\"", query1);
     let matches = graph.find_matches(query1);
     for m in matches {
-        println!("  -> {}", m);
+        println!("  -> {}", m.fact);
     }
 
     println!(" ");
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Query: \"{}\"", query2);
     let matches = graph.find_matches(query2);
     for m in matches {
-        println!("  -> {}", m);
+        println!("  -> {}", m.fact);
     }
 
     Ok(())

@@ -3,14 +3,6 @@ use anyhow::Result;
 use llm::builder::{LLMBackend, LLMBuilder};
 use llm::chat::ChatMessage;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct LlmResponse {
-    pub action_taken: bool,
-    pub answer: String,
-}
-
 #[derive(Clone)]
 pub struct LlmModel {
     pub model_name: String,
@@ -25,17 +17,16 @@ impl LlmModel {
         }
     }
 
-    /// Reusable main prompt instructions demanding a structured JSON response.
+    /// Reusable main prompt instructions.
     pub fn main_prompt() -> &'static str {
-        "You are a meeting assistant. Analyze the user's request/question. \
-If it is a valid question, actionable request, or command, respond with a JSON object where \"action_taken\" is true and \"answer\" is your markdown-formatted response. \
-If it is noise, chit-chat, incomplete/cut-off speech, or not an actionable question, respond with a JSON object where \"action_taken\" is false and \"answer\" is an empty string (\"\"). \
-Do not output any introductory or concluding text outside of the raw JSON object. Your response MUST be valid JSON.\n\n\
-Format:\n\
-{\n  \"action_taken\": bool,\n  \"answer\": \"string\"\n}"
+        "You are an intelligent live meeting assistant. You receive transcripts of what participants are saying in real-time. \
+Your job is to analyze the user's spoken request/question.\n\n\
+Core Directives:\n\
+1. PROJECT QUERIES: If the user asks for project-specific information (e.g., about people in the meeting, private project details, specific code), you MUST answer using ONLY the provided context. If the context is insufficient, you MUST output exactly `[IGNORE]` and nothing else. Do not hallucinate.\n\
+2. GENERAL KNOWLEDGE: If the user asks a general question (e.g., about algorithms, DSA, standard coding practices, math), you MAY use your own knowledge to answer it.\n\
+3. NOISE: If the speech is just noise, chit-chat between participants, rhetorical, or not an actionable request directed at you, you MUST output exactly `[IGNORE]` and absolutely nothing else."
     }
 
-    /// Appends context and score-specific instructions to the main prompt.
     pub fn build_prompt(
         question: &str,
         context: &[SearchCandidate],
@@ -47,7 +38,8 @@ Format:\n\
         prompt.push_str("\n\n");
 
         if max_cosine > 0.70 || max_bm25 > 5.0 {
-            prompt.push_str("Answer the user's question based ONLY on the following context retrieved from their personal database. Do not use outside information.\n\n");
+            prompt.push_str("--- Context Level: HIGH CONFIDENCE ---\n\
+You have retrieved highly relevant context from the user's personal database (documents, transcripts, meeting notes). Rely heavily on this context.\n\n");
             for (i, item) in context.iter().enumerate() {
                 prompt.push_str(&format!(
                     "[Context {}]\nType: {}\nContent: {}\n\n",
@@ -56,8 +48,9 @@ Format:\n\
                     item.content
                 ));
             }
-        } else if max_cosine > 0.50 || max_bm25 > 2.0 {
-            prompt.push_str("You have been provided some context that might be relevant. Use it if helpful, but you may also rely on your own knowledge.\n\n");
+        } else if max_cosine > 0.50 || max_bm25 > 2.0 || !context.is_empty() {
+            prompt.push_str("--- Context Level: LOW CONFIDENCE ---\n\
+You have been provided some context that might be relevant. Use it if helpful.\n\n");
             for (i, item) in context.iter().enumerate() {
                 prompt.push_str(&format!(
                     "[Context {}]\nType: {}\nContent: {}\n\n",
@@ -67,10 +60,14 @@ Format:\n\
                 ));
             }
         } else {
-            prompt.push_str("Answer the user's question directly from your own knowledge.\n\n");
+            prompt.push_str("--- Context Level: NO CONTEXT ---\n\
+No relevant context was found in the database. Remember to output `[IGNORE]` if this is a project-specific query.\n\n");
         }
 
-        prompt.push_str(&format!("User's Question: {}\n\nJSON Response:", question));
+        prompt.push_str(&format!(
+            "User's Spoken Input: {}\n\nAssistant Response:",
+            question
+        ));
         prompt
     }
 
@@ -158,23 +155,10 @@ mod tests {
 
         let prompt = LlmModel::build_prompt(question, &context, 0.85, 0.0);
         assert!(prompt.contains(LlmModel::main_prompt()));
-        assert!(prompt.contains("Answer the user's question based ONLY on the following context"));
+        assert!(prompt.contains("--- Context Level: HIGH CONFIDENCE ---"));
         assert!(prompt.contains("[Context 1]"));
         assert!(prompt.contains("Run apt install pipewire-audio"));
-        assert!(prompt.contains("User's Question: How do I setup pipewire?"));
-    }
-
-    #[test]
-    fn test_llm_response_json_deserialization() {
-        let json_str = r#"{"action_taken": true, "answer": "Install pipewire package."}"#;
-        let response: LlmResponse = serde_json::from_str(json_str).unwrap();
-        assert!(response.action_taken);
-        assert_eq!(response.answer, "Install pipewire package.");
-
-        let negative_json = r#"{"action_taken": false, "answer": ""}"#;
-        let response_neg: LlmResponse = serde_json::from_str(negative_json).unwrap();
-        assert!(!response_neg.action_taken);
-        assert_eq!(response_neg.answer, "");
+        assert!(prompt.contains("User's Spoken Input: How do I setup pipewire?"));
     }
 
     #[tokio::test]

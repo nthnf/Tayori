@@ -90,7 +90,8 @@ impl ProjectPageModel {
                 ..Default::default()
             })
             .exec(db)
-            .await {
+            .await
+            {
                 tracing::error!("Failed to mark document as failed: {}", e);
             }
             anyhow!("{}", err_msg)

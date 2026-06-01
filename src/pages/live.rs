@@ -206,12 +206,18 @@ pub fn LivePage(project_id: String, session_id: String) -> Element {
                                 });
                             } else {
                                 is_thinking.set(false);
-                                qa_history.with_mut(|h| {
-                                    if let Some(last) = h.last_mut() {
-                                        last.is_thinking = false;
-                                        last.answer = answer.clone();
-                                    }
-                                });
+                                if answer.contains("[IGNORE]") {
+                                    qa_history.with_mut(|h| {
+                                        h.pop(); // Remove the ignored QA completely!
+                                    });
+                                } else {
+                                    qa_history.with_mut(|h| {
+                                        if let Some(last) = h.last_mut() {
+                                            last.is_thinking = false;
+                                            last.answer = answer.clone();
+                                        }
+                                    });
+                                }
                             }
                         }
                     });
@@ -299,35 +305,44 @@ pub fn LivePage(project_id: String, session_id: String) -> Element {
                             }
                         }
                         for pair in qa_history().clone().into_iter().rev() {
-                            div {
-                                key: "{pair.question}",
-                                class: "flex flex-col gap-4 border-b border-surface-dark-elevated pb-6 last:border-b-0",
-                                div { class: "border-l-4 border-primary bg-surface-dark-elevated px-5 py-4 font-mono text-sm leading-relaxed text-on-dark-soft",
-                                    div { class: "mb-3 flex items-center gap-3",
-                                        span { class: "text-xs font-semibold uppercase tracking-[0.12em] text-on-dark-soft",
-                                            "Detected question"
-                                        }
-                                    }
-                                    p { class: "whitespace-pre-wrap text-base leading-7 text-on-dark",
-                                        "{pair.question}"
-                                    }
+                            if pair.is_thinking && pair.answer.is_empty() {
+                                div {
+                                    key: "thinking-{pair.question}",
+                                    class: "flex items-center gap-3 border-b border-surface-dark-elevated pb-6 last:border-b-0 py-4",
+                                    div { class: "h-2 w-2 animate-ping rounded-full bg-primary" }
+                                    p { class: "font-mono text-sm italic text-on-dark-soft", "Analyzing intent{thinking_dots()}" }
                                 }
-
-                                div { class: "border-l-4 border-hairline px-5 py-1 font-mono text-sm leading-relaxed text-on-dark-soft",
-                                    p { class: "mb-4 text-sm font-semibold text-on-dark-soft",
-                                        if pair.is_thinking {
-                                            span { class: "italic",
-                                                "Thinking{thinking_dots()} Suggested answer"
+                            } else {
+                                div {
+                                    key: "{pair.question}",
+                                    class: "flex flex-col gap-4 border-b border-surface-dark-elevated pb-6 last:border-b-0",
+                                    div { class: "border-l-4 border-primary bg-surface-dark-elevated px-5 py-4 font-mono text-sm leading-relaxed text-on-dark-soft",
+                                        div { class: "mb-3 flex items-center gap-3",
+                                            span { class: "text-xs font-semibold uppercase tracking-[0.12em] text-on-dark-soft",
+                                                "Detected question"
                                             }
-                                        } else {
-                                            span { class: "italic", "Suggested answer" }
+                                        }
+                                        p { class: "whitespace-pre-wrap text-base leading-7 text-on-dark",
+                                            "{pair.question}"
                                         }
                                     }
-                                    div { class: "whitespace-pre-wrap text-base leading-7",
-                                        if pair.answer.is_empty() && pair.is_thinking {
-                                            ""
-                                        } else {
-                                            "{pair.answer}"
+
+                                    div { class: "border-l-4 border-hairline px-5 py-1 font-mono text-sm leading-relaxed text-on-dark-soft",
+                                        p { class: "mb-4 text-sm font-semibold text-on-dark-soft",
+                                            if pair.is_thinking {
+                                                span { class: "italic",
+                                                    "Generating response{thinking_dots()}"
+                                                }
+                                            } else {
+                                                span { class: "italic", "Suggested answer" }
+                                            }
+                                        }
+                                        div { class: "whitespace-pre-wrap text-base leading-7",
+                                            if pair.answer.is_empty() && pair.is_thinking {
+                                                ""
+                                            } else {
+                                                "{pair.answer}"
+                                            }
                                         }
                                     }
                                 }

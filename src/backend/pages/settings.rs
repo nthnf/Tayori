@@ -38,7 +38,6 @@ impl SettingsPageModel {
             llm_provider: Set("openai".to_string()),
             llm_model: Set("gpt-5.4-mini".to_string()),
             transcript_model: Set("medium".to_string()),
-            summary_minutes: Set(5),
             ui_theme: Set("light".to_string()),
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
@@ -61,7 +60,6 @@ impl SettingsPageModel {
             llm_provider: Set(updated_settings.llm_provider),
             llm_model: Set(updated_settings.llm_model),
             transcript_model: Set(updated_settings.transcript_model),
-            summary_minutes: Set(updated_settings.summary_minutes),
             ui_theme: Set(updated_settings.ui_theme),
             created_at: Set(updated_settings.created_at),
             updated_at: Set(Utc::now()),
@@ -84,7 +82,6 @@ impl SettingsPageModel {
             llm_provider: Set("openai".to_string()),
             llm_model: Set("gpt-5.4-mini".to_string()),
             transcript_model: Set("medium".to_string()),
-            summary_minutes: Set(5),
             ui_theme: Set("light".to_string()),
             updated_at: Set(Utc::now()),
             ..Default::default()

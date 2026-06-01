@@ -77,7 +77,10 @@ impl TinyBertDetector {
         let token_type_ids_tensor = Value::from_array(token_type_ids_arr)?;
 
         // Run Inference with Mutex lock
-        let mut session_guard = self.session.lock().map_err(|e| anyhow!("Mutex poisoned: {}", e))?;
+        let mut session_guard = self
+            .session
+            .lock()
+            .map_err(|e| anyhow!("Mutex poisoned: {}", e))?;
         let outputs = session_guard
             .run(inputs![
                 "input_ids" => input_ids_tensor,

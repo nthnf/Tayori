@@ -233,7 +233,9 @@ impl ResampleWorker {
                     {
                         for &sample in &output_buffer[0][..frames_out] {
                             if let Err(_e) = output.try_push(sample) {
-                                tracing::trace!("Output ringbuffer full during flush, dropped sample");
+                                tracing::trace!(
+                                    "Output ringbuffer full during flush, dropped sample"
+                                );
                             }
                         }
                     }

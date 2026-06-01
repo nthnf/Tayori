@@ -35,7 +35,7 @@ impl LivePageModel {
             .await
             .map_err(|e| anyhow!("Failed to fetch session: {}", e))?;
 
-        let is_ended = session.map(|s| s.status == "completed").unwrap_or(false);
+        let is_ended = session.map(|s| s.status == "completed" || s.status == "cancelled").unwrap_or(false);
 
         let transcripts = transcript_chunks::Entity::find()
             .filter(transcript_chunks::Column::SessionId.eq(session_id))
@@ -194,6 +194,9 @@ impl LivePageModel {
                                         match pos_model.extract_entities(&text_to_process) {
                                             Ok(entities) => {
                                                 if entities.is_empty() { return; }
+
+                                                tracing::info!("Extracted {} semantic entities from chunk", entities.len());
+
                                                 let mut graph = match session_graph_clone.write() {
                                                     Ok(g) => g,
                                                     Err(e) => {
@@ -201,11 +204,15 @@ impl LivePageModel {
                                                         return;
                                                     }
                                                 };
+
                                                 if entities.len() == 1 {
                                                     let entity = &entities[0];
-                                                    graph.add_node(&entity.text, &entity.category);
+                                                    graph.add_node(&entity.text, &entity.category, chunk_id);
+                                                    tracing::debug!("Added 1 isolated node to Session Graph: {}", entity.text);
                                                     return;
                                                 }
+
+                                                let mut edge_count = 0;
                                                 for i in 0..entities.len() - 1 {
                                                     let source = &entities[i];
                                                     let target = &entities[i + 1];
@@ -216,7 +223,9 @@ impl LivePageModel {
                                                         &target.category,
                                                         chunk_id,
                                                     );
+                                                    edge_count += 1;
                                                 }
+                                                tracing::debug!("Added {} new semantic edges to Session Graph", edge_count);
                                             }
                                             Err(e) => tracing::error!("Failed to extract entities: {:?}", e),
                                         }
@@ -314,8 +323,11 @@ impl LivePageModel {
                                 tracing::error!("Failed to broadcast QA token/status: {:?}", e);
                             }
                         };
+                        
+                        // Immediately show Thinking state on the UI
+                        send_qa(format!("[START_QA]:{}", text));
 
-                        // Query the in-memory session graph instead of smart_hybrid_search
+                        // 1. Get graph facts
                         let facts = match session_graph_for_qa.read() {
                             Ok(graph) => graph.find_matches(&extracted_query),
                             Err(e) => {
@@ -324,22 +336,109 @@ impl LivePageModel {
                             }
                         };
 
-                        let candidates: Vec<crate::backend::search::SearchCandidate> = facts
+                        let mut all_chunk_ids = std::collections::HashSet::new();
+                        for fact in &facts {
+                            for id in &fact.chunk_ids {
+                                all_chunk_ids.insert(id.to_string());
+                            }
+                        }
+
+                        let mut chunk_map = std::collections::HashMap::new();
+                        if !all_chunk_ids.is_empty() {
+                            match transcript_chunks::Entity::find()
+                                .filter(transcript_chunks::Column::Id.is_in(all_chunk_ids))
+                                .all(db)
+                                .await
+                            {
+                                Ok(chunks) => {
+                                    for c in chunks {
+                                        chunk_map.insert(c.id, c.text);
+                                    }
+                                }
+                                Err(e) => tracing::error!("Failed to fetch graph chunks: {}", e),
+                            }
+                        }
+
+                        let mut has_graph_facts = false;
+                        let mut candidates: Vec<crate::backend::search::SearchCandidate> = facts
                             .into_iter()
                             .enumerate()
-                            .map(|(i, fact)| crate::backend::search::SearchCandidate {
-                                id: format!("graph_fact_{}", i),
-                                source_type: "graph_relation".to_string(),
-                                content: fact,
-                                raw_score: 1.0,
+                            .map(|(i, fact)| {
+                                has_graph_facts = true;
+                                let mut context_texts = Vec::new();
+                                for id in &fact.chunk_ids {
+                                    if let Some(text) = chunk_map.get(&id.to_string()) {
+                                        context_texts.push(text.clone());
+                                    }
+                                }
+
+                                let content = if context_texts.is_empty() {
+                                    fact.fact
+                                } else {
+                                    format!("{} | Context: {}", fact.fact, context_texts.join(" ... "))
+                                };
+
+                                crate::backend::search::SearchCandidate {
+                                    id: format!("graph_fact_{}", i),
+                                    source_type: "graph_relation".to_string(),
+                                    content,
+                                    raw_score: 1.0, // High raw score since it's an exact graph match
+                                }
                             })
                             .collect();
 
-                        let (max_cosine, max_bm25) = if candidates.is_empty() {
-                            (0.0, 0.0)
-                        } else {
-                            (1.0, 10.0)
-                        };
+                        let mut max_cosine = 0.0;
+                        let mut max_bm25 = 0.0;
+
+                        // 2. Fetch document chunk vectors using Hybrid Search
+                        let embedder_arc = state_clone.embedder.clone();
+                        let text_to_embed = extracted_query.clone();
+                        let embed_result = tokio::task::spawn_blocking(move || {
+                            if let Some(embedder) = embedder_arc.get() {
+                                embedder.embed(vec![text_to_embed])
+                            } else {
+                                Err(anyhow::anyhow!("Embedder not initialized"))
+                            }
+                        })
+                        .await;
+
+                        if let Ok(Ok(vectors)) = embed_result {
+                            if let Some(query_vector) = vectors.into_iter().next() {
+                                match crate::backend::search::smart_hybrid_search(
+                                    db,
+                                    &extracted_query,
+                                    query_vector,
+                                    Some(5), // limit
+                                )
+                                .await
+                                {
+                                    Ok((c_max, b_max, doc_candidates)) => {
+                                        max_cosine = c_max;
+                                        max_bm25 = b_max;
+                                        candidates.extend(doc_candidates);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Hybrid document search failed: {}", e);
+                                    }
+                                }
+                            }
+                        } else if let Err(e) = embed_result {
+                            tracing::error!("Embedder task failed: {}", e);
+                        }
+
+                        // If we have highly-accurate graph facts, boost the scores so it triggers
+                        // the strict, anti-hallucination prompt block.
+                        if has_graph_facts {
+                            if max_cosine < 0.8 {
+                                max_cosine = 0.8;
+                            }
+                            if max_bm25 < 6.0 {
+                                max_bm25 = 6.0;
+                            }
+                        } else if max_cosine == 0.0 && max_bm25 == 0.0 && !candidates.is_empty() {
+                            max_cosine = 1.0;
+                            max_bm25 = 10.0;
+                        }
 
                         let llm_opt = state_clone.llm.get().cloned();
 
@@ -363,64 +462,46 @@ impl LivePageModel {
                             Ok(mut stream) => {
                                 use futures::StreamExt;
                                 let mut full_response = String::new();
+                                let mut ignored = false;
+
                                 while let Some(chunk) = stream.next().await {
                                     if let Ok(chunk_text) = chunk {
                                         full_response.push_str(&chunk_text);
+
+                                        // Buffer if it looks like it might be writing [IGNORE]
+                                        if full_response.len() < 8 && "[IGNORE]".starts_with(full_response.trim()) {
+                                            continue;
+                                        }
+
+                                        if full_response.contains("[IGNORE]") {
+                                            send_qa("[IGNORE]".to_string());
+                                            ignored = true;
+                                            break;
+                                        }
+
+                                        send_qa(full_response.clone());
                                     }
                                 }
 
-                                // Clean formatting backticks if LLM wrapped JSON in markdown code blocks
-                                let cleaned_response = {
-                                    let mut s = full_response.trim();
-                                    if s.starts_with("```json") {
-                                        s = s.strip_prefix("```json").unwrap_or(s);
-                                    } else if s.starts_with("```") {
-                                        s = s.strip_prefix("```").unwrap_or(s);
-                                    }
-                                    if s.ends_with("```") {
-                                        s = s.strip_suffix("```").unwrap_or(s);
-                                    }
-                                    s.trim()
-                                };
-
-                                use crate::backend::models::llm::LlmResponse;
-                                let parsed: Result<LlmResponse, serde_json::Error> = serde_json::from_str(cleaned_response);
-
-                                let (action_taken, answer) = match parsed {
-                                    Ok(res) => (res.action_taken, res.answer),
-                                    Err(err) => {
-                                        tracing::warn!("Failed to parse LLM response as JSON: {}. Text: {}", err, full_response);
-                                        (true, full_response)
-                                    }
-                                };
-
-                                if action_taken {
-                                    send_qa(format!("[START_QA]:{}", text));
-                                    if answer.trim().is_empty() {
-                                        send_qa("(LLM returned an empty response)".to_string());
-                                    } else {
-                                        send_qa(answer.clone());
-
-                                        let answer_model = session_answers::ActiveModel {
-                                            id: Set(uuid::Uuid::new_v4().to_string()),
-                                            session_id: Set(session_id_clone2.clone()),
-                                            project_id: Set(project_id_clone.clone()),
-                                            context: Set(None),
-                                            query: Set(text.clone()),
-                                            answer: Set(answer),
-                                            created_at: Set(Utc::now()),
-                                        };
-                                        if let Err(e) = answer_model.insert(db).await {
-                                            error!("Failed to save QA session: {}", e);
-                                        }
-                                    }
-                                } else {
+                                if ignored || full_response.trim() == "[IGNORE]" {
                                     tracing::info!("QA Loop: Ignored speech segment as noise/non-actionable: '{}'", text);
+                                } else if !full_response.is_empty() {
+                                    let answer_model = session_answers::ActiveModel {
+                                        id: Set(uuid::Uuid::new_v4().to_string()),
+                                        session_id: Set(session_id_clone2.clone()),
+                                        project_id: Set(project_id_clone.clone()),
+                                        context: Set(None),
+                                        query: Set(text.clone()),
+                                        answer: Set(full_response.trim().to_string()),
+                                        created_at: Set(Utc::now()),
+                                    };
+                                    if let Err(e) = answer_model.insert(db).await {
+                                        tracing::error!("Failed to save QA session: {}", e);
+                                    }
                                 }
                             }
                             Err(e) => {
-                                error!("LLM QA error: {}", e);
-                                send_qa(format!("[START_QA]:{}", text));
+                                tracing::error!("LLM QA error: {}", e);
                                 send_qa(format!("LLM Error: {}", e));
                             }
                         }

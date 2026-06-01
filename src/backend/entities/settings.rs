@@ -10,7 +10,6 @@ pub struct Model {
     pub llm_provider: String,
     pub llm_model: String,
     pub transcript_model: String,
-    pub summary_minutes: i64,
     pub ui_theme: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,

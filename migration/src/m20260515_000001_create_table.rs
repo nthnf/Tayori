@@ -124,16 +124,6 @@ async fn create_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                         )),
                 )
                 .col(
-                    ColumnDef::new(Settings::SummaryMinutes)
-                        .integer()
-                        .not_null()
-                        .default(5)
-                        .check((
-                            "ck_settings_summary_minutes",
-                            Expr::col(Settings::SummaryMinutes).between(1, 10),
-                        )),
-                )
-                .col(
                     ColumnDef::new(Settings::UiTheme)
                         .string()
                         .not_null()
@@ -168,7 +158,6 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Settings::LlmProvider,
             Settings::LlmModel,
             Settings::TranscriptModel,
-            Settings::SummaryMinutes,
             Settings::UiTheme,
         ])
         .values_panic([
@@ -176,7 +165,6 @@ async fn seed_settings(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             "openai".into(),
             "gpt-5.4-mini".into(),
             "medium".into(),
-            5.into(),
             "light".into(),
         ])
         .on_conflict(OnConflict::column(Settings::Id).do_nothing().to_owned())
@@ -673,7 +661,6 @@ enum Settings {
     LlmProvider,
     LlmModel,
     TranscriptModel,
-    SummaryMinutes,
     UiTheme,
     CreatedAt,
     UpdatedAt,

@@ -13,7 +13,7 @@ pub fn SettingsPage() -> Element {
     let mut draft_provider = use_signal(|| "openai".to_string());
     let mut draft_llm_model = use_signal(|| "gpt-5.4-mini".to_string());
     let mut draft_transcript = use_signal(|| "medium".to_string());
-    let mut draft_summary_minutes = use_signal(|| 5);
+
     let mut is_loaded = use_signal(|| false);
     let mut action_error = use_signal(|| None::<String>);
 
@@ -55,7 +55,7 @@ pub fn SettingsPage() -> Element {
             draft_provider.set(d.settings.llm_provider.clone());
             draft_llm_model.set(d.settings.llm_model.clone());
             draft_transcript.set(d.settings.transcript_model.clone());
-            draft_summary_minutes.set(d.settings.summary_minutes);
+
             is_loaded.set(true);
         }
     });
@@ -67,7 +67,6 @@ pub fn SettingsPage() -> Element {
         let provider = draft_provider();
         let llm_model = draft_llm_model();
         let transcript = draft_transcript();
-        let summary = draft_summary_minutes();
 
         spawn(async move {
             let mut updated_settings = None;
@@ -77,7 +76,7 @@ pub fn SettingsPage() -> Element {
                 s.llm_provider = provider;
                 s.llm_model = llm_model;
                 s.transcript_model = transcript;
-                s.summary_minutes = summary;
+
                 updated_settings = Some(s);
             }
             if let Some(s) = updated_settings {
@@ -101,7 +100,6 @@ pub fn SettingsPage() -> Element {
             draft_provider.set(d.settings.llm_provider.clone());
             draft_llm_model.set(d.settings.llm_model.clone());
             draft_transcript.set(d.settings.transcript_model.clone());
-            draft_summary_minutes.set(d.settings.summary_minutes);
         }
     };
 
@@ -110,7 +108,6 @@ pub fn SettingsPage() -> Element {
             || draft_provider() != d.settings.llm_provider
             || draft_llm_model() != d.settings.llm_model
             || draft_transcript() != d.settings.transcript_model
-            || draft_summary_minutes() != d.settings.summary_minutes
     } else {
         false
     };
@@ -246,28 +243,6 @@ pub fn SettingsPage() -> Element {
                                     class: "w-64 rounded-lg border border-hairline bg-surface-soft px-3 py-2 text-sm text-ink outline-none focus:border-primary",
                                     value: "{draft_llm_model}",
                                     oninput: move |e| draft_llm_model.set(e.value().clone()),
-                                }
-                            }
-                            div { class: "flex items-center justify-between",
-                                div {
-                                    label { class: "block font-semibold text-ink",
-                                        "Summary Interval (Minutes)"
-                                    }
-                                    p { class: "text-sm text-body",
-                                        "How frequently to generate summaries (1 to 10)."
-                                    }
-                                }
-                                input {
-                                    r#type: "number",
-                                    min: "1",
-                                    max: "10",
-                                    class: "w-24 rounded-lg border border-hairline bg-surface-soft px-3 py-2 text-sm text-ink outline-none focus:border-primary",
-                                    value: "{draft_summary_minutes}",
-                                    oninput: move |e| {
-                                        if let Ok(val) = e.value().parse::<i32>() {
-                                            draft_summary_minutes.set(val.clamp(1, 10).into());
-                                        }
-                                    },
                                 }
                             }
                         }
