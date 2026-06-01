@@ -1,4 +1,8 @@
 [application]
+name = "tayori"
+
+[bundle]
+identifier = "com.tayori.app"
 
 [web.app]
 

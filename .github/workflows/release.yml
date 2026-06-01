@@ -1,0 +1,64 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger when a tag like v1.0.0 is pushed
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli
+
+      - name: Build Windows Installer
+        run: dx bundle --release --platform desktop
+
+      - name: Upload Windows Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: tayori-windows
+          path: target/dx/tayori/release/bundle/msi/*.msi
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libssl-dev pkg-config webkit2gtk-4.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli
+
+      - name: Build Linux AppImage and DEB
+        run: dx bundle --release --platform desktop
+
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: tayori-linux-appimage
+          path: target/dx/tayori/release/bundle/appimage/*.AppImage
+
+      - name: Upload Linux DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: tayori-linux-deb
+          path: target/dx/tayori/release/bundle/deb/*.deb
