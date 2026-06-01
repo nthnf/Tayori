@@ -15,7 +15,7 @@
   <a href="https://dioxuslabs.com/"><img src="https://img.shields.io/badge/GUI-Dioxus%200.7-blue?logo=rust&style=flat-square" alt="Dioxus" /></a>
   <a href="https://onnxruntime.ai/"><img src="https://img.shields.io/badge/ML%20Inference-ONNX%20Runtime-green?logo=onnx&style=flat-square" alt="ONNX Runtime" /></a>
   <a href="https://sqlite.org/"><img src="https://img.shields.io/badge/Database-SQLite-blueviolet?logo=sqlite&logoColor=white&style=flat-square" alt="SQLite" /></a>
-  <a href="https://github.com/nthnf/tayori-v2/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/nthnf/tayori-v2/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-GPL-blue?style=flat-square" alt="License" /></a>
 </p>
 
 ---
